@@ -6,7 +6,7 @@ After=network.target motorical-backend-api.service motorical-comm-api.service
 Type=simple
 WorkingDirectory=/root/motoric_smtp/communications-block
 Environment=NODE_ENV=production
-EnvironmentFile=/root/motoric_smtp/communications-block/.env
+EnvironmentFile=/etc/motorical/communications-block.env
 ExecStart=/usr/bin/node src/worker/sender.js
 Restart=on-failure
 RestartSec=5
