@@ -1,0 +1,21 @@
+[Unit]
+Description=Motorical Communications Block Stats Worker
+After=network.target motorical-comm-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/motoric_smtp/communications-block
+Environment=NODE_ENV=production
+EnvironmentFile=/root/motoric_smtp/communications-block/.env
+ExecStart=/usr/bin/node src/worker/stats.js
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+
+

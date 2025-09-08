@@ -1,0 +1,32 @@
+{
+  "name": "communications-block",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Motorical Communications Block - independent service for lists, templates, and campaigns",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js",
+    "worker": "node src/worker/sender.js",
+    "stats": "node src/worker/stats.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "pg": "^8.11.5",
+    "pino": "^9.2.0",
+    "pino-http": "^9.0.0",
+    "nodemailer": "^6.9.13",
+    "uuid": "^9.0.1",
+    "multer": "^1.4.5-lts.1",
+    "csv-parse": "^5.5.6"
+  }
+}
