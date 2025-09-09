@@ -199,7 +199,22 @@ location /comm-api/ {
 
 ## 📊 **API Reference**
 
-### **Core Endpoints**
+### **🧪 Interactive API Sandbox**
+
+**Try the Communications Block APIs with realistic demo data - no signup required!**
+
+👉 **[API Documentation & Playground →](https://motorical.com/public-api/docs)**  
+👉 **[Advanced API Testing →](https://motorical.com/settings/api-access)**
+
+The sandbox includes **comprehensive demo data** for:
+- **📈 Real-time Analytics**: Campaign performance metrics, delivery rates, engagement tracking
+- **📝 Email Logs**: Searchable message history with detailed metadata
+- **⚡ Rate Limits**: Current usage, quotas, and reset times  
+- **🎯 Deliverability**: Domain-specific performance analytics
+- **🔍 Recipient Analytics**: Individual contact delivery insights
+- **📊 Campaign Intelligence**: Advanced reporting and ROI analysis
+
+### **Core Communications Block Endpoints**
 
 ```bash
 # Tenant Management
@@ -209,27 +224,94 @@ POST   /api/provision/tenant     # Provision new tenant (internal)
 GET    /api/lists                # Get all lists
 POST   /api/lists                # Create new list
 POST   /api/lists/:id/contacts/import  # CSV import
+POST   /contacts/:id/unsubscribe # Add to customer suppression list
+PUT    /contacts/:id/resubscribe # Remove from customer suppression list
 
 # Templates
 GET    /api/templates            # Get all templates
 POST   /api/templates            # Create template
+DELETE /api/templates/:id        # Delete template (with confirmation)
 
 # Campaigns
 GET    /api/campaigns            # Get all campaigns
 POST   /api/campaigns            # Create campaign
 POST   /api/campaigns/:id/schedule    # Schedule campaign
-GET    /api/campaigns/:id/analytics   # Campaign analytics
-GET    /api/campaigns/:id/recipients  # Get campaign recipients
+GET    /api/campaigns/:id/analytics   # Enhanced campaign analytics
+GET    /api/campaigns/:id/recipients  # Get campaign recipients with insights
+GET    /api/campaigns/:id/events      # Email events and delivery tracking
+DELETE /api/campaigns/:id        # Delete campaign (with confirmation)
 
-# Suppressions (Customer-Scoped)
-GET    /api/suppressions         # Get suppression list
-POST   /api/suppressions         # Add suppression
-DELETE /api/suppressions/:id     # Remove suppression
+# Customer-Scoped Suppressions
+GET    /api/suppressions         # Get customer suppression list
+POST   /api/suppressions         # Add email suppression
+DELETE /api/suppressions/:id     # Remove email suppression
+POST   /api/suppressions/bulk    # Bulk suppression import
+GET    /api/suppressions/stats   # Suppression analytics
 
-# Compliance
+# Compliance & Tracking
 GET    /t/u/:token              # Unsubscribe landing page
 POST   /t/u/:token              # Process unsubscribe
 ```
+
+### **🔗 Motorical Platform Integration APIs**
+
+**Available via the main [Motorical Public API](https://motorical.com/settings/api-access):**
+
+```bash
+# Motor Block Analytics (Perfect for Communications Block integration)
+GET    /api/public/v1/motor-blocks                    # List motor blocks
+GET    /api/public/v1/motor-blocks/{id}/rate-limits   # Usage quotas & limits
+GET    /api/public/v1/motor-blocks/{id}/metrics       # Time-series delivery metrics
+GET    /api/public/v1/motor-blocks/{id}/logs          # Searchable email logs
+GET    /api/public/v1/motor-blocks/{id}/deliverability # Domain performance analysis
+GET    /api/public/v1/motor-blocks/{id}/reputation    # Sender reputation scoring
+GET    /api/public/v1/motor-blocks/{id}/anomalies     # Delivery anomaly detection
+GET    /api/public/v1/messages/{messageId}            # Individual message lookup
+
+# Webhook Management (For real-time event processing)
+GET    /api/public/v1/motor-blocks/{id}/webhooks      # List webhooks
+POST   /api/public/v1/motor-blocks/{id}/webhooks      # Create webhook
+PUT    /api/public/v1/motor-blocks/{id}/webhooks/{id} # Update webhook
+DELETE /api/public/v1/motor-blocks/{id}/webhooks/{id} # Delete webhook
+
+# Real-time Event Streaming
+GET    /api/public/v1/motor-blocks/{id}/events/stream # Server-Sent Events (SSE)
+```
+
+### **🚀 Communications Block API Enhancement Opportunities**
+
+**To maximize the value for Communications Block users, consider these additional API endpoints:**
+
+```bash
+# Enhanced Campaign Analytics (Future roadmap)
+GET    /api/campaigns/:id/recipient-insights          # Per-recipient deliverability scores
+GET    /api/campaigns/:id/domain-performance          # Domain-specific delivery analytics  
+GET    /api/campaigns/:id/engagement-timeline         # Hour-by-hour engagement patterns
+GET    /api/campaigns/:id/cohort-analysis             # A/B testing and segment performance
+
+# Advanced Suppression Management
+GET    /api/suppressions/recommendations              # AI-powered suppression suggestions
+GET    /api/suppressions/cross-campaign               # Global suppression analytics
+POST   /api/suppressions/validate                     # Validate email deliverability
+
+# Real-time Communications Intelligence  
+GET    /api/intelligence/optimal-send-times           # Best send times by domain/recipient
+GET    /api/intelligence/content-analysis             # Subject line and content scoring
+GET    /api/intelligence/reputation-monitoring        # Sender reputation alerts
+GET    /api/intelligence/deliverability-forecast      # Predictive delivery analytics
+
+# Integration with Motorical Platform Analytics
+GET    /api/hybrid/campaign-motor-block-stats         # Unified campaign + motor block metrics
+GET    /api/hybrid/recipient-delivery-journey         # End-to-end delivery tracking
+GET    /api/hybrid/performance-benchmarking          # Industry benchmark comparisons
+```
+
+**🎯 Why These Matter for Communications Block:**
+- **📊 Campaign Optimization**: Data-driven decisions for better engagement
+- **🎯 Precision Targeting**: AI-powered insights for optimal delivery
+- **🔍 Delivery Intelligence**: Deep recipient and domain analytics
+- **📈 Performance Benchmarking**: Industry comparison and improvement recommendations
+- **⚡ Real-time Optimization**: Dynamic send-time and content optimization
 
 ---
 
