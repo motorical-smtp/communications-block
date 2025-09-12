@@ -44,31 +44,46 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 
 ---
 
-## ✨ **Features**
+## ✨ **Features (Production v2.0)**
 
-### **📋 Campaign Management**
-- **Lists & Contacts**: Import, segment, and manage contact databases
-- **Email Templates**: HTML/text templates with merge variable support
-- **Smart Campaigns**: Scheduling, chunked delivery, timezone handling
-- **Real-time Analytics**: Comprehensive delivery tracking and recipient insights
+### **🎯 Compile-Before-Send Architecture**
+- **Immutable Campaigns**: Pre-processed artifacts ensure predictable sends
+- **HTML Processing**: Security validation, CSS inlining, link tracking integration
+- **UTM Management**: Preserve customer UTMs while adding tracking parameters
+- **Link Tracking**: JWT-secured click tracking with engagement analytics
+- **Plaintext Generation**: Intelligent HTML-to-text conversion for multi-part emails
 
-### **🛡️ Compliance & Deliverability**  
+### **📊 Mega List - Excel-Like Recipient Management**
+- **Smart Status Computation**: Real-time engagement classification (new → sent → delivered → engaged)
+- **Advanced Filtering**: Multi-criteria filtering with pagination and sorting
+- **Bulk Operations**: Soft delete, bulk move, restore with transaction safety
+- **Recycle Bin**: Safety-first approach with accident recovery
+- **Engagement Tracking**: Click events automatically update recipient status
+
+### **📈 Google Analytics Integration**
+- **SendGrid-Style UTM Control**: Customer manages their own GA parameters
+- **Dual Attribution**: Platform tracking + customer GA attribution simultaneously
+- **UTM Preservation**: Existing customer UTMs never overwritten
+- **Campaign-Level Configuration**: Per-campaign GA settings with full transparency
+
+### **🎯 Production-Ready Campaign System**
+- **Visual Campaign Builder**: Material-UI integrated campaign creation workflow
+- **List Selection UI**: Enhanced dropdown with checkboxes and smart feedback
+- **Real-Time Preview**: Compiled HTML preview with merge tag substitution
+- **Link Processing Report**: Detailed analysis of tracked vs. preserved links
+
+### **🛡️ Enterprise Security & Compliance**
+- **Security Validation**: HTML size caps, DOM node limits, suspicious pattern detection
+- **JWT Click Tracking**: Signed tokens with tenant isolation and expiration
 - **Customer-Scoped Suppressions**: Industry-standard unsubscribe management
-- **CAN-SPAM Compliance**: Automatic unsubscribe handling with legal compliance
-- **Cross-Customer Isolation**: Professional suppression list management
-- **GDPR Ready**: Data export, deletion, and retention controls
+- **GDPR Ready**: Soft delete patterns with data retention controls
+- **Audit Logging**: Complete activity tracking with tenant isolation
 
-### **🎛️ Enterprise Controls**
-- **Delete Confirmations**: Prevent accidental data loss across all operations
-- **Tenant Isolation**: Multi-customer support with strict data boundaries
-- **Advanced Permissions**: Role-based access and entitlement enforcement
-- **Audit Logging**: Complete activity tracking for compliance
-
-### **📊 Business Intelligence**
-- **Delivery Intelligence**: Advanced recipient scoring and domain analysis
-- **Campaign Analytics**: Open rates, click rates, bounce analysis, ROI tracking
-- **Suppression Management**: Comprehensive unsubscribe analytics and management
-- **API Integration**: Full REST API for custom integrations and automation
+### **⚡ Performance & Scalability**
+- **Database Optimization**: Enhanced recipient_status view with real-time analytics
+- **Connection Pooling**: PostgreSQL pool management for high concurrency
+- **Background Processing**: Asynchronous campaign compilation and sending
+- **Rate Limiting**: Respects Motorical platform rate controls
 
 ---
 
@@ -195,7 +210,43 @@ location /comm-api/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
+
+# Click tracking integration (v2.0)
+location /c/ {
+    proxy_pass http://127.0.0.1:3011;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_intercept_errors off;
+}
+
+# Unsubscribe tracking
+location /t/ {
+    proxy_pass http://127.0.0.1:3011;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_intercept_errors off;
+}
 ```
+
+### **v2.0 Technical Architecture**
+
+**Production-Ready Infrastructure:**
+- **Database**: 5 migrations with UUID compliance and real-time analytics integration
+- **Services**: 3 systemd services (API, sender worker, stats worker) with health monitoring
+- **Security**: JWT-based click tracking with tenant isolation and expiration policies
+- **Performance**: Connection pooling, background processing, and optimized database views
+- **Reliability**: Soft delete patterns, transaction safety, and comprehensive error handling
+
+**New v2.0 Components:**
+- **Compile Hooks System**: Extensible pre/post-compile processing (security, metrics, link processing)
+- **Link Processor**: UTM preservation, tracking wrapping, and do-not-track enforcement
+- **HTML-to-Text Engine**: Intelligent plaintext generation from customer HTML
+- **Recipient Status View**: Real-time classification engine for engagement tracking
+- **Bulk Operations Engine**: Transaction-safe bulk processing with audit logging
 
 ---
 
@@ -216,35 +267,51 @@ The sandbox includes **comprehensive demo data** for:
 - **🔍 Recipient Analytics**: Individual contact delivery insights
 - **📊 Campaign Intelligence**: Advanced reporting and ROI analysis
 
-### **Core Communications Block Endpoints**
+### **Core Communications Block v2.0 Endpoints**
 
 ```bash
 # Tenant Management
 POST   /api/provision/tenant     # Provision new tenant (internal)
 
-# Lists & Contacts  
-GET    /api/lists                # Get all lists
+# Lists & Contacts Management
+GET    /api/lists                # Get all lists with metadata
 POST   /api/lists                # Create new list
-POST   /api/lists/:id/contacts/import  # CSV import
+POST   /api/lists/from-filter    # Create list from Mega List filter
+DELETE /api/lists/:id            # Soft delete list
+POST   /api/lists/:id/contacts/import  # CSV import with validation
 POST   /contacts/:id/unsubscribe # Add to customer suppression list
 PUT    /contacts/:id/resubscribe # Remove from customer suppression list
 
+# Mega List - Excel-Like Recipient Management
+GET    /api/recipients           # Advanced filtering with pagination
+GET    /api/recipients/deleted   # Recycle bin view
+POST   /api/recipients/bulk-delete    # Soft delete multiple recipients  
+POST   /api/recipients/bulk-move      # Move recipients between lists
+POST   /api/recipients/restore        # Restore from recycle bin
+
 # Templates
 GET    /api/templates            # Get all templates
-POST   /api/templates            # Create template
+POST   /api/templates            # Create template with HTML validation
 DELETE /api/templates/:id        # Delete template (with confirmation)
 
-# Campaigns
-GET    /api/campaigns            # Get all campaigns
-POST   /api/campaigns            # Create campaign
-POST   /api/campaigns/:id/schedule    # Schedule campaign
-GET    /api/campaigns/:id/analytics   # Enhanced campaign analytics
-GET    /api/campaigns/:id/recipients  # Get campaign recipients with insights
-GET    /api/campaigns/:id/events      # Email events and delivery tracking
+# Campaign Management (Compile-Before-Send)
+GET    /api/campaigns            # Get campaigns with compilation status
+POST   /api/campaigns            # Create campaign with GA integration
+POST   /api/campaigns/:id/compile      # Compile with link processing & security validation
+GET    /api/campaigns/:id/artifacts    # Get compiled artifacts & metadata
+POST   /api/campaigns/:id/schedule     # Schedule with immutable artifacts
+GET    /api/campaigns/:id/analytics    # Enhanced analytics with list attribution
+GET    /api/campaigns/:id/recipients   # Recipients with engagement status
+GET    /api/campaigns/:id/events       # Email events with click tracking
 DELETE /api/campaigns/:id        # Delete campaign (with confirmation)
 
-# Compile-Before-Send (Phase 1)
-POST   /api/campaigns/:id/compile      # Compile template + audience snapshot (immutable version)
+# Click Tracking (JWT-Secured)
+GET    /c/:token                 # Click tracking redirect
+GET    /t/u/:token              # Unsubscribe tracking
+
+# Analytics & Insights
+GET    /api/analytics/dashboard  # Tenant-wide marketing analytics
+GET    /api/analytics/lists/:id  # Per-list performance insights
 ```
 
 ### **🔗 Motorical Platform Integration APIs**
