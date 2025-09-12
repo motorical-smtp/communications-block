@@ -1,7 +1,12 @@
 import express from 'express';
-import { query } from '../db.js';
+import { query, pool } from '../db.js';
 import { requireEntitledTenant } from '../middleware/entitlement.js';
 import { registerWebhook } from './webhooks.js';
+import { getLatestArtifact, getLatestAudienceSnapshot } from '../repo/compile.js';
+import { executeHooks } from '../services/compile-hooks.js';
+import pino from 'pino';
+
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 const router = express.Router();
 
@@ -14,15 +19,22 @@ function requireTenant(req, res, next) {
 
 router.post('/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const { name, template_id, list_ids, motor_block_id } = req.body || {};
+    const { name, template_id, list_ids, motor_block_id, google_analytics } = req.body || {};
     if (!name || !template_id || !Array.isArray(list_ids) || list_ids.length === 0 || !motor_block_id) {
       return res.status(400).json({ success: false, error: 'name, template_id, motor_block_id, list_ids[] required' });
     }
+    
+    // Prepare Google Analytics settings with defaults
+    const gaSettings = {
+      enabled: false,
+      ...google_analytics
+    };
+    
     const c = await query(
-      `INSERT INTO campaigns (tenant_id, name, template_id, motor_block_id)
-       VALUES ($1,$2,$3,$4)
-       RETURNING id, name, template_id, motor_block_id, status, created_at`,
-      [req.tenantId, name, template_id, motor_block_id]
+      `INSERT INTO campaigns (tenant_id, name, template_id, motor_block_id, google_analytics)
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING id, name, template_id, motor_block_id, status, created_at, google_analytics`,
+      [req.tenantId, name, template_id, motor_block_id, JSON.stringify(gaSettings)]
     );
     const campaignId = c.rows[0].id;
     for (const lid of list_ids) {
@@ -127,10 +139,18 @@ router.post('/campaigns/:id/cancel', requireTenant, requireEntitledTenant, async
 
 router.get('/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const r = await query(`SELECT id, name, template_id, motor_block_id, status, 
+    const r = await query(`SELECT id, name, template_id, motor_block_id, status, google_analytics,
                            CASE WHEN scheduled_at IS NOT NULL THEN to_char(scheduled_at::timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ELSE NULL END as scheduled_at, 
                            created_at FROM campaigns WHERE tenant_id=$1 ORDER BY created_at DESC`, [req.tenantId]);
-    res.json({ success: true, data: r.rows });
+    
+    // Enrich with latest artifacts and snapshots for each campaign
+    const enrichedCampaigns = await Promise.all(r.rows.map(async (campaign) => {
+      const latestArtifact = await getLatestArtifact(campaign.id, req.tenantId);
+      const latestSnapshot = await getLatestAudienceSnapshot(campaign.id, req.tenantId);
+      return { ...campaign, latestArtifact, latestSnapshot };
+    }));
+    
+    res.json({ success: true, data: enrichedCampaigns });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Failed to fetch campaigns' });
   }
@@ -138,11 +158,14 @@ router.get('/campaigns', requireTenant, requireEntitledTenant, async (req, res) 
 
 router.get('/campaigns/:id', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const r = await query(`SELECT id, name, template_id, motor_block_id, status, timezone, 
+    const r = await query(`SELECT id, name, template_id, motor_block_id, status, google_analytics, timezone, 
                            CASE WHEN scheduled_at IS NOT NULL THEN to_char(scheduled_at::timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ELSE NULL END as scheduled_at, 
                            created_at FROM campaigns WHERE tenant_id=$1 AND id=$2`, [req.tenantId, req.params.id]);
     if (r.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
-    res.json({ success: true, data: r.rows[0] });
+    // Attach latest compile info (if any)
+    const latestArtifact = await getLatestArtifact(req.params.id, req.tenantId);
+    const latestSnapshot = await getLatestAudienceSnapshot(req.params.id, req.tenantId);
+    res.json({ success: true, data: { ...r.rows[0], latestArtifact, latestSnapshot } });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Failed to fetch campaign' });
   }
@@ -304,11 +327,12 @@ router.get('/campaigns/:id/analytics', requireTenant, requireEntitledTenant, asy
       _ts: new Date(event.occurred_at).getTime()
     }));
 
-    // Summary and classification mapping
-    const summary = { totalEmails: filtered.length, deliveryRate: 0, acceptanceRate: 0, reputationScore: 100 };
-    let delivered = 0, accepted = 0, failed = 0, hardBounce = 0, softBounce = 0;
+    // Summary and classification mapping - enhanced with click tracking
+    const summary = { totalEmails: filtered.length, deliveryRate: 0, acceptanceRate: 0, clickRate: 0, reputationScore: 100 };
+    let delivered = 0, accepted = 0, failed = 0, hardBounce = 0, softBounce = 0, clicked = 0;
     const classify = (s) => {
       const t = String(s || '').toLowerCase();
+      if (t.includes('click')) return 'clicked';
       if (t.includes('deliver')) return 'delivered';
       if (t.includes('accepted') || t.includes('sent')) return 'accepted';
       if (t.includes('hard')) return 'hard_bounce';
@@ -322,12 +346,28 @@ router.get('/campaigns/:id/analytics', requireTenant, requireEntitledTenant, asy
     for (const it of filtered) {
       const c = classify(it.status || it.classification);
       const day = new Date(it._ts).toISOString().split('T')[0];
-      dailyBreakdown[day] = dailyBreakdown[day] || { accepted: 0, delivered: 0, hard_bounce: 0, soft_bounce: 0 };
+      dailyBreakdown[day] = dailyBreakdown[day] || { accepted: 0, delivered: 0, hard_bounce: 0, soft_bounce: 0, clicked: 0 };
       dailyBreakdown[day][c] = (dailyBreakdown[day][c] || 0) + 1;
-      if (c === 'delivered') delivered++; else if (c === 'accepted') accepted++; else if (c === 'failed') failed++; else if (c === 'hard_bounce') hardBounce++; else if (c === 'soft_bounce') softBounce++;
+      if (c === 'delivered') delivered++; 
+      else if (c === 'accepted') accepted++; 
+      else if (c === 'clicked') clicked++; 
+      else if (c === 'failed') failed++; 
+      else if (c === 'hard_bounce') hardBounce++; 
+      else if (c === 'soft_bounce') softBounce++;
     }
     summary.deliveryRate = filtered.length ? Math.round(((delivered + accepted) / filtered.length) * 100) : 0;
     summary.acceptanceRate = filtered.length ? Math.round((accepted / filtered.length) * 100) : 0;
+    summary.clickRate = delivered > 0 ? Math.round((clicked / delivered) * 100) : 0;
+    summary.totalClicks = clicked;
+    
+    // Get unique clickers
+    const uniqueClickers = new Set();
+    events.rows.forEach(event => {
+      if (event.type === 'clicked' && event.contact_id) {
+        uniqueClickers.add(event.contact_id);
+      }
+    });
+    summary.uniqueClickers = uniqueClickers.size;
 
     const recentActivity = events.rows
       .slice(0, 25)
@@ -404,5 +444,159 @@ router.get('/campaigns/:id/recipients', requireTenant, requireEntitledTenant, as
 });
 
 export default router;
+
+// Compile-before-send endpoint
+router.post('/campaigns/:id/compile', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    // Validate campaign and ownership
+    const c = await query(
+      'SELECT c.id, c.tenant_id, c.template_id, c.status, c.google_analytics, t.name as template_name, t.subject, t.body_html, t.body_text\n       FROM campaigns c JOIN templates t ON t.id=c.template_id\n       WHERE c.id=$1 AND c.tenant_id=$2',
+      [campaignId, req.tenantId]
+    );
+    if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found' });
+
+    // Determine next version
+    const vq = await query('SELECT COALESCE(MAX(version),0)+1 as next FROM comm_campaign_artifacts WHERE campaign_id=$1', [campaignId]);
+    const version = vq.rows?.[0]?.next || 1;
+
+    // Basic HTML processing placeholder (sanitize/inlining/tracking will be added next phases)
+    const subject = c.rows[0].subject || '';
+    const htmlCompiled = c.rows[0].body_html || '';
+    const textCompiled = c.rows[0].body_text || '';
+
+    // Compute audience at compile time using current recipient logic
+    const recipientsQ = await query(`
+      SELECT DISTINCT LOWER(c.email) AS email
+      FROM campaign_lists cl
+      JOIN list_contacts lc ON lc.list_id = cl.list_id AND lc.status='active'
+      JOIN contacts c ON c.id = lc.contact_id AND c.status='active'
+      JOIN tenants tt ON tt.id = c.tenant_id
+      LEFT JOIN suppressions s ON s.motorical_account_id = tt.motorical_account_id AND s.email = c.email
+      WHERE cl.campaign_id=$1 AND c.tenant_id=$2 AND s.email IS NULL
+    `, [campaignId, req.tenantId]);
+    const totalRecipients = recipientsQ.rowCount || 0;
+
+    // Insert artifact and audience snapshot in a transaction (single connection)
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO comm_campaign_artifacts (tenant_id, campaign_id, version, subject, html_compiled, text_compiled, meta)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [req.tenantId, campaignId, version, subject, htmlCompiled, textCompiled, JSON.stringify({ compiled_at: new Date().toISOString() })]
+      );
+      await client.query(
+        `INSERT INTO comm_audience_snapshots (tenant_id, campaign_id, version, total_recipients, included_lists, deduped_by, filters)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [req.tenantId, campaignId, version, totalRecipients, null, 'email', null]
+      );
+
+      // Pre-commit security validation
+      const securityContext = {
+        type: 'compile.validation',
+        campaignId,
+        tenantId: req.tenantId,
+        version,
+        artifact: { subject, htmlCompiled, textCompiled }
+      };
+
+      try {
+        const { executeHooks } = await import('../services/compile-hooks.js');
+        const validationResults = await executeHooks('compile.validation', securityContext);
+        const securityResult = validationResults.find(r => r.hook === 'security-validation');
+        
+        if (securityResult?.success && !securityResult.result?.validated) {
+          // Security validation failed - rollback and reject
+          await client.query('ROLLBACK');
+          client.release();
+          return res.status(400).json({
+            success: false,
+            error: 'Security validation failed',
+            details: {
+              errors: securityResult.result.errors,
+              warnings: securityResult.result.warnings
+            }
+          });
+        }
+
+        // Store security metrics in artifact metadata if validation passed
+        if (securityResult?.success && (securityResult.result?.warnings?.length > 0 || securityResult.result?.metrics)) {
+          const { warnings, metrics } = securityResult.result;
+          const metaUpdate = {
+            security: {
+              metrics,
+              warnings,
+              validatedAt: new Date().toISOString()
+            }
+          };
+          
+          await client.query(
+            'UPDATE comm_campaign_artifacts SET meta = COALESCE(meta, \'{}\') || $1::jsonb WHERE campaign_id = $2 AND version = $3',
+            [JSON.stringify(metaUpdate), campaignId, version]
+          );
+        }
+      } catch (validationError) {
+        logger.warn({ campaignId, error: validationError.message }, 'Security validation hook failed');
+        // Continue with compilation - don't block on hook failures
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // Execute post-compile hooks and update artifact with processed content
+    const campaign = c.rows[0];
+    const hookContext = {
+      type: 'compile.completed',
+      campaignId,
+      tenantId: req.tenantId,
+      version,
+      totalRecipients,
+      campaign: {
+        id: campaign.id,
+        name: campaign.template_name,
+        google_analytics: campaign.google_analytics
+      },
+      artifact: { subject, htmlCompiled, textCompiled }
+    };
+    
+    try {
+      const hookResults = await executeHooks('compile.completed', hookContext);
+      
+      // Check if link processing updated the HTML content
+      const linkProcessingResult = hookResults.find(r => r.hook === 'link-processing');
+      if (linkProcessingResult?.success && linkProcessingResult.result?.trackingApplied) {
+        // Import link processor to get the processed HTML
+        const { processHtmlLinks } = await import('../services/link-processor.js');
+        const { processedHtml } = await processHtmlLinks(htmlCompiled, {
+          campaignId,
+          version,
+          utmPolicy: 'preserve'
+        });
+        
+        // Update artifact with processed HTML containing tracking links
+        if (processedHtml !== htmlCompiled) {
+          await query(
+            'UPDATE comm_campaign_artifacts SET html_compiled = $1 WHERE campaign_id = $2 AND version = $3',
+            [processedHtml, campaignId, version]
+          );
+          logger.info({ campaignId, version }, 'Artifact updated with processed links');
+        }
+      }
+    } catch (hookError) {
+      console.warn('Post-compile hooks failed:', hookError);
+    }
+
+    res.json({ success: true, data: { version, totalRecipients } });
+  } catch (e) {
+    console.error('Compile error:', e);
+    res.status(500).json({ success: false, error: 'Failed to compile campaign', details: e.message });
+  }
+});
 
 

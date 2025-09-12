@@ -16,11 +16,11 @@ function requireTenant(req, res, next) {
 
 router.post('/lists', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const { name, description } = req.body || {};
+    const { name, description, type = 'user' } = req.body || {};
     if (!name) return res.status(400).json({ success: false, error: 'name required' });
     const r = await query(
-      'INSERT INTO lists (tenant_id, name, description) VALUES ($1,$2,$3) RETURNING id, name, description, created_at',
-      [req.tenantId, name, description || null]
+      'INSERT INTO lists (tenant_id, name, description, type) VALUES ($1,$2,$3,$4) RETURNING id, name, description, type, created_at',
+      [req.tenantId, name, description || null, type]
     );
     res.json({ success: true, data: r.rows[0] });
   } catch (e) {
@@ -28,9 +28,121 @@ router.post('/lists', requireTenant, requireEntitledTenant, async (req, res) => 
   }
 });
 
+// POST /api/lists/from-filter - Save filtered recipients as a new list
+router.post('/lists/from-filter', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const { name, description, filters } = req.body;
+    const tenantId = req.tenantId;
+    
+    if (!name) {
+      return res.status(400).json({ success: false, error: 'List name is required' });
+    }
+
+    // Create the list first
+    const listResult = await query(
+      'INSERT INTO lists (tenant_id, name, description, type, filter_definition) VALUES ($1,$2,$3,$4,$5) RETURNING id, name, description, type, created_at',
+      [tenantId, name, description || `Filtered list: ${name}`, 'smart', JSON.stringify(filters || {})]
+    );
+    
+    const listId = listResult.rows[0].id;
+
+    // Apply the same filter logic as in recipients.js to get matching contacts
+    const conditions = ['rs.tenant_id = $1'];
+    const params = [tenantId];
+    let paramCount = 1;
+
+    // Apply filters to find matching recipients
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== '') {
+          paramCount++;
+          switch (key) {
+            case 'status':
+              conditions.push(`rs.computed_status = ANY($${paramCount})`);
+              params.push(Array.isArray(value) ? value : [value]);
+              break;
+            case 'engagement':
+              conditions.push(`rs.engagement_level = ANY($${paramCount})`);
+              params.push(Array.isArray(value) ? value : [value]);
+              break;
+            case 'suppressed':
+              if (value === true) {
+                conditions.push('rs.suppression_reason IS NOT NULL');
+                paramCount--; // No param used
+              } else if (value === false) {
+                conditions.push('rs.suppression_reason IS NULL');
+                paramCount--; // No param used
+              }
+              break;
+            case 'email_domain':
+              conditions.push(`rs.email LIKE '%@' || $${paramCount}`);
+              params.push(value);
+              break;
+            case 'search':
+              conditions.push(`(rs.email ILIKE '%' || $${paramCount} || '%' OR rs.name ILIKE '%' || $${paramCount} || '%')`);
+              params.push(value);
+              break;
+          }
+        }
+      });
+    }
+
+    const whereClause = conditions.join(' AND ');
+    
+    // Get matching recipients and add them to the list
+    const recipientsQuery = `
+      SELECT rs.id
+      FROM recipient_status rs
+      WHERE ${whereClause}
+      LIMIT 10000  -- Reasonable limit for list creation
+    `;
+
+    const recipientsResult = await query(recipientsQuery, params);
+    
+    // Add recipients to the list
+    if (recipientsResult.rows.length > 0) {
+      const insertValues = recipientsResult.rows.map((_, index) => 
+        `($1, $${index + 2}, 'active', NOW())`
+      ).join(', ');
+      
+      const insertQuery = `
+        INSERT INTO list_contacts (list_id, contact_id, status, created_at) 
+        VALUES ${insertValues}
+        ON CONFLICT (list_id, contact_id) DO NOTHING
+      `;
+      
+      const insertParams = [listId, ...recipientsResult.rows.map(r => r.id)];
+      await query(insertQuery, insertParams);
+    }
+
+    // Get final count
+    const countResult = await query(
+      'SELECT COUNT(*) as count FROM list_contacts WHERE list_id = $1 AND status = $2',
+      [listId, 'active']
+    );
+
+    res.json({
+      success: true,
+      data: {
+        ...listResult.rows[0],
+        recipient_count: parseInt(countResult.rows[0].count),
+        filters_applied: filters
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to create list from filter:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create list from filter',
+      details: error.message
+    });
+  }
+});
+
 router.get('/lists', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const r = await query('SELECT id, name, description, created_at FROM lists WHERE tenant_id=$1 ORDER BY created_at DESC', [req.tenantId]);
+    const r = await query('SELECT id, name, description, type, filter_definition, created_at FROM lists WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY type DESC, created_at DESC', [req.tenantId]);
     res.json({ success: true, data: r.rows });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Failed to fetch lists' });

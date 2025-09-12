@@ -12,6 +12,8 @@ import trackingRouter from './routes/tracking.js';
 import provisioningRouter from './routes/provisioning.js';
 import webhooksRouter from './routes/webhooks.js';
 import suppressionsRouter from './routes/suppressions.js';
+import recipientsRouter from './routes/recipients.js';
+import analyticsRouter from './routes/analytics.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -50,6 +52,8 @@ app.get('/api/health', async (req, res) => {
 app.use('/api', listsRouter);
 app.use('/api', templatesRouter);
 app.use('/api', campaignsRouter);
+app.use('/api', recipientsRouter);
+app.use('/api', analyticsRouter);
 app.use('/api', provisioningRouter);
 app.use('/api/suppressions', suppressionsRouter);
 app.use('/', webhooksRouter);

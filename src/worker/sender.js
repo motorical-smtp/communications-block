@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import pino from 'pino';
 import { query } from '../db.js';
+import { getLatestArtifact } from '../repo/compile.js';
 import nodemailer from 'nodemailer';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -27,6 +28,63 @@ function renderTemplate(template, contact) {
   const bodyHtml = (template.body_html || '').replace(/\{\{\s*name\s*\}\}/g, vars.name).replace(/\{\{\s*identity_name\s*\}\}/g, vars.identity_name);
   const bodyText = (template.body_text || '').replace(/\{\{\s*name\s*\}\}/g, vars.name).replace(/\{\{\s*identity_name\s*\}\}/g, vars.identity_name);
   return { subject, bodyHtml, bodyText };
+}
+
+async function renderFromArtifact(artifact, contact, { campaignId, tenantId } = {}) {
+  const vars = {
+    name: contact.name || '',
+    identity_name: contact.identity_name || ''
+  };
+  const subject = String(artifact.subject || '')
+    .replace(/\{\{\s*name\s*\}\}/g, vars.name)
+    .replace(/\{\{\s*identity_name\s*\}\}/g, vars.identity_name);
+  
+  let bodyHtml = String(artifact.html_compiled || '')
+    .replace(/\{\{\s*name\s*\}\}/g, vars.name)
+    .replace(/\{\{\s*identity_name\s*\}\}/g, vars.identity_name);
+  
+  // Replace tracking token placeholders with actual JWT tokens
+  if (campaignId && tenantId && contact.contact_id) {
+    bodyHtml = await replaceTrackingTokens(bodyHtml, {
+      campaignId,
+      tenantId,
+      contactId: contact.contact_id
+    });
+  }
+    
+  const bodyText = String(artifact.text_compiled || '')
+    .replace(/\{\{\s*name\s*\}\}/g, vars.name)
+    .replace(/\{\{\s*identity_name\s*\}\}/g, vars.identity_name);
+  return { subject, bodyHtml, bodyText };
+}
+
+async function replaceTrackingTokens(html, { campaignId, tenantId, contactId }) {
+  // Import the JWT token signer - dynamic import to avoid circular dependencies
+  const { signClickToken } = await import('../routes/tracking.js');
+  
+  // Replace TRACK_TOKEN_campaignId_linkIndex patterns with actual JWT tokens
+  return html.replace(/TRACK_TOKEN_([^_]+)_(\d+)/g, (match, campId, linkIndex) => {
+    if (campId === campaignId) {
+      try {
+        // Extract the original URL from the tracking link
+        const urlMatch = html.match(new RegExp(`/c/${match}\\?url=([^"\\s&]+)`));
+        const originalUrl = urlMatch ? decodeURIComponent(urlMatch[1]) : '';
+        
+        return signClickToken({
+          tenantId,
+          campaignId,
+          contactId,
+          originalUrl,
+          linkIndex: parseInt(linkIndex),
+          ttl: '90d'
+        });
+      } catch (error) {
+        logger.warn({ error: error.message, campaignId, linkIndex }, 'Failed to generate click token');
+        return match; // Keep placeholder if token generation fails
+      }
+    }
+    return match;
+  });
 }
 
 async function getDueCampaigns() {
@@ -137,6 +195,9 @@ async function processCampaign(c) {
     return;
   }
 
+  // Prefer compiled artifact when available for immutability and parity
+  const latestArtifact = await getLatestArtifact(c.id, c.tenant_id).catch(() => null);
+
   const processed = await getProcessedContactIds(c.id);
   const candidates = await getCandidateRecipients(c.id, c.tenant_id, c.chunk_size);
   const remaining = candidates.filter((r) => !processed.has(r.contact_id));
@@ -151,7 +212,9 @@ async function processCampaign(c) {
   logger.info({ campaignId: c.id, candidates: candidates.length, processed: processed.size, batch: batch.length }, 'processing batch');
   for (const recipient of batch) {
     try {
-      const rendered = renderTemplate(template, recipient);
+      const rendered = latestArtifact ? 
+        await renderFromArtifact(latestArtifact, recipient, { campaignId: c.id, tenantId: c.tenant_id }) : 
+        renderTemplate(template, recipient);
       // Generate unsubscribe URL token and inject into HTML/text if present
       let unsubscribeUrl = null;
       try {

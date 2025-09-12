@@ -147,7 +147,9 @@ cp .env.example .env
 # 4. Setup database
 sudo -u postgres psql -c "CREATE DATABASE communications_db;"
 sudo -u postgres psql -c "CREATE USER comm_user WITH PASSWORD 'secure_password';"
-sudo -u postgres psql -d communications_db -f migrations/schema.sql
+sudo -u postgres psql -d communications_db -f migrations/0001_init.sql
+sudo -u postgres psql -d communications_db -f migrations/0002_customer_scoped_suppressions.sql
+sudo -u postgres psql -d communications_db -f migrations/0003_compile_before_send.sql   # Phase 1
 
 # 5. Start services
 sudo cp systemd/*.service /etc/systemd/system/
@@ -241,16 +243,8 @@ GET    /api/campaigns/:id/recipients  # Get campaign recipients with insights
 GET    /api/campaigns/:id/events      # Email events and delivery tracking
 DELETE /api/campaigns/:id        # Delete campaign (with confirmation)
 
-# Customer-Scoped Suppressions
-GET    /api/suppressions         # Get customer suppression list
-POST   /api/suppressions         # Add email suppression
-DELETE /api/suppressions/:id     # Remove email suppression
-POST   /api/suppressions/bulk    # Bulk suppression import
-GET    /api/suppressions/stats   # Suppression analytics
-
-# Compliance & Tracking
-GET    /t/u/:token              # Unsubscribe landing page
-POST   /t/u/:token              # Process unsubscribe
+# Compile-Before-Send (Phase 1)
+POST   /api/campaigns/:id/compile      # Compile template + audience snapshot (immutable version)
 ```
 
 ### **🔗 Motorical Platform Integration APIs**
@@ -333,6 +327,16 @@ suppressions(id, motorical_account_id, tenant_id, email, reason, source, ...)
 
 -- Analytics & Events
 email_events(id, tenant_id, campaign_id, contact_id, message_id, type, occurred_at, ...)
+
+-- Phase 1 Additions (Compile-Before-Send)
+comm_campaign_artifacts(
+  id UUID PK, tenant_id UUID, campaign_id UUID, version INT,
+  subject TEXT, html_compiled TEXT, text_compiled TEXT, meta JSONB, created_at TIMESTAMP
+)
+comm_audience_snapshots(
+  id UUID PK, tenant_id UUID, campaign_id UUID, version INT,
+  total_recipients INT, included_lists JSONB, deduped_by TEXT, filters JSONB, created_at TIMESTAMP
+)
 ```
 
 ### **Services**

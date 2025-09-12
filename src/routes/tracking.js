@@ -173,6 +173,114 @@ async function handleUnsub(req, res) {
 router.get('/t/u/:token', handleUnsub);
 router.post('/t/u/:token', handleUnsub);
 
+// Helper used by sender to generate click tracking tokens
+export function signClickToken({ tenantId, campaignId, contactId, originalUrl, linkIndex, ttl = '90d' }) {
+  const secret = process.env.SERVICE_JWT_SECRET || 'dev-secret';
+  return jwt.sign({ 
+    tenantId, 
+    campaignId, 
+    contactId, 
+    originalUrl, 
+    linkIndex,
+    t: 'click' 
+  }, secret, { expiresIn: ttl });
+}
+
+async function recordClick({ tenantId, campaignId, contactId, originalUrl, linkIndex, userAgent, ip }) {
+  try {
+    // Record click event in email_events
+    await query(
+      `INSERT INTO email_events (tenant_id, campaign_id, contact_id, type, payload, occurred_at)
+       VALUES ($1, $2, $3, 'clicked', $4, NOW())`,
+      [tenantId, campaignId, contactId, JSON.stringify({ 
+        originalUrl, 
+        linkIndex, 
+        userAgent: userAgent?.substring(0, 500), // Limit length
+        ip: ip?.substring(0, 45) // IPv6 max length
+      })]
+    );
+
+    // Update contact last engagement
+    await query(
+      `UPDATE contacts SET last_engagement_at = NOW(), updated_at = NOW() 
+       WHERE id = $1 AND tenant_id = $2`,
+      [contactId, tenantId]
+    );
+
+    console.log(`Click recorded: campaign=${campaignId}, contact=${contactId}, url=${originalUrl}`);
+    return true;
+  } catch (error) {
+    console.error('Failed to record click:', error);
+    return false;
+  }
+}
+
+// GET/POST /c/:token — click tracking redirect
+async function handleClick(req, res) {
+  try {
+    const { token } = req.params;
+    const { url } = req.query;
+    const secret = process.env.SERVICE_JWT_SECRET || 'dev-secret';
+    
+    let decoded;
+    try {
+      decoded = jwt.verify(token, secret);
+    } catch (err) {
+      console.warn('Invalid click token:', err.message);
+      // Still redirect to the URL if provided for user experience
+      if (url) {
+        return res.redirect(302, decodeURIComponent(url));
+      }
+      return res.status(400).send('<html><body>Invalid tracking link.</body></html>');
+    }
+
+    if (decoded.t !== 'click') {
+      console.warn('Invalid click token type:', decoded.t);
+      if (url || decoded.originalUrl) {
+        return res.redirect(302, decodeURIComponent(url || decoded.originalUrl));
+      }
+      return res.status(400).send('<html><body>Invalid tracking link.</body></html>');
+    }
+
+    const { tenantId, campaignId, contactId, originalUrl, linkIndex } = decoded;
+    const targetUrl = url ? decodeURIComponent(url) : originalUrl;
+
+    if (!targetUrl) {
+      return res.status(400).send('<html><body>Missing destination URL.</body></html>');
+    }
+
+    // Record the click (async, don't block redirect)
+    const userAgent = req.headers['user-agent'];
+    const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'];
+    
+    recordClick({ 
+      tenantId, 
+      campaignId, 
+      contactId, 
+      originalUrl: targetUrl, 
+      linkIndex, 
+      userAgent, 
+      ip 
+    }).catch(error => {
+      console.error('Click recording failed:', error);
+    });
+
+    // Immediate redirect for good user experience
+    res.redirect(302, targetUrl);
+
+  } catch (error) {
+    console.error('Click handling error:', error);
+    const { url } = req.query;
+    if (url) {
+      return res.redirect(302, decodeURIComponent(url));
+    }
+    res.status(500).send('<html><body>Tracking failed. Please try again later.</body></html>');
+  }
+}
+
+router.get('/c/:token', handleClick);
+router.post('/c/:token', handleClick);
+
 export default router;
 
 
