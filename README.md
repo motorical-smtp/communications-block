@@ -1,24 +1,55 @@
-# 📧 Communications Block - Email Marketing Plugin for Motorical
+# 📧 Communications Block - Email Marketing Module for Motorical
 
 [![Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)](https://github.com/gliepins/marketing-motorical)
-[![Plugin Architecture](https://img.shields.io/badge/Architecture-Plugin-blue.svg)](https://motorical.com)
+[![Click Tracking](https://img.shields.io/badge/Click%20Tracking-Operational-success.svg)](https://track.motorical.com)
+[![Module Architecture](https://img.shields.io/badge/Architecture-Module-blue.svg)](https://motorical.com)
+[![Open Source](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B-blue.svg)](https://postgresql.org/)
 
-> **A production-ready email marketing plugin that seamlessly integrates with the [Motorical](https://motorical.com) email infrastructure ecosystem.**
+> **A production-ready email marketing module that seamlessly integrates with the [Motorical](https://motorical.com) email infrastructure ecosystem. Open source to demonstrate transparency and the module architecture approach.**
+
+---
+
+## 🌟 **Why This Repository is Public**
+
+This repository is **open source** to demonstrate **transparency** and **openness** about the Communications Block approach and the broader Motorical ecosystem architecture. While the main Motorical platform remains closed-source, this module serves as a **reference implementation** showing:
+
+- **🔍 Transparent Architecture**: See exactly how modules integrate with the Motorical ecosystem
+- **📚 Educational Value**: Learn from a production-ready email marketing system
+- **🔌 Module Pattern**: Understand the module architecture and integration approach
+- **🏗️ Best Practices**: Reference implementation for building Motorical ecosystem modules
+- **🤝 Community Trust**: Open codebase demonstrates commitment to transparency
+
+**The main Motorical platform** (backend API, frontend, SMTP gateway, delivery engine) remains **closed-source** for business reasons, but this module demonstrates the **extensible architecture** that makes Motorical powerful.
+
+> **Note**: This is a **tightly integrated module**, not a standalone plugin. It requires Motorical's database, queue system, and account infrastructure to function. See [PLUGGABILITY_ASSESSMENT.md](PLUGGABILITY_ASSESSMENT.md) for detailed integration analysis.
 
 ---
 
 ## 🚀 **What is Communications Block?**
 
-Communications Block is an **enterprise-grade email marketing plugin** designed specifically for the **[Motorical](https://motorical.com) ecosystem**. It transforms any Motorical-powered email infrastructure into a complete marketing automation platform while maintaining the plugin architecture principles of independence, scalability, and easy deployment.
+Communications Block is an **enterprise-grade email marketing module** designed specifically for the **[Motorical](https://motorical.com) ecosystem**. It extends Motorical's email infrastructure with complete marketing automation capabilities, tightly integrated with Motorical's core services for seamless operation.
 
-### **🎯 Plugin Philosophy**
+### **📬 Flexible Email Infrastructure Support**
 
-- **🔌 Truly Pluggable**: Add or remove without affecting core Motorical services
+Originally developed as a marketing automation module, Communications Block has been **adopted and extended** to work seamlessly with various email infrastructure setups, including:
+
+- **📧 Simple IMAP Mailboxes**: Works with standard IMAP-based email systems
+- **🚀 SMTP Gateway Integration**: Leverages Motorical's high-performance SMTP infrastructure
+- **📊 Multi-Tenant Campaigns**: Supports complex marketing workflows
+- **🔌 Module Architecture**: Tightly integrated with Motorical for seamless operation
+
+This flexibility makes Communications Block suitable for everything from simple email marketing campaigns to complex multi-tenant marketing automation platforms.
+
+### **🎯 Module Philosophy**
+
+- **🔌 Integrated Module**: Deeply integrated with Motorical's core infrastructure
 - **🏗️ Independently Deployable**: Own database, services, and repository
-- **🌐 API-First Integration**: Loose coupling via REST APIs and environment configuration
+- **🌐 API-First Integration**: Uses Motorical APIs and direct database access for performance
 - **⚡ Production Battle-Tested**: Live in production with active customers and real campaigns
+- **🔓 Open & Transparent**: Public repository demonstrates architecture and approach
+- **📬 Flexible Infrastructure**: Works with SMTP gateways, IMAP mailboxes, and various email setups
 
 ---
 
@@ -33,12 +64,15 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 - **🔐 Security-First**: DKIM signing, SPF/DMARC alignment, dedicated IPs
 - **📈 Scalability**: Handle millions of emails with intelligent rate limiting
 - **🛡️ Deliverability**: Professional reputation management and ISP relationships
+- **📬 IMAP Support**: Works seamlessly with simple IMAP mailboxes and standard email infrastructure
 
 **Perfect for:**
 - SaaS platforms needing transactional + marketing emails
 - Agencies managing multiple client email campaigns  
 - E-commerce businesses requiring reliable email delivery
 - Enterprise teams needing advanced email infrastructure
+- **Simple IMAP mailbox users** who want marketing automation capabilities
+- **Multi-tenant platforms** requiring flexible email marketing solutions
 
 👉 **[Get started with Motorical →](https://motorical.com)**
 
@@ -54,17 +88,17 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 - **Plaintext Generation**: Intelligent HTML-to-text conversion for multi-part emails
 
 ### **📊 Mega List - Excel-Like Recipient Management**
-- **Smart Status Computation**: Real-time engagement classification (new → sent → delivered → engaged)
-- **Advanced Filtering**: Multi-criteria filtering with pagination and sorting
-- **Bulk Operations**: Soft delete, bulk move, restore with transaction safety
-- **Recycle Bin**: Safety-first approach with accident recovery
-- **Engagement Tracking**: Click events automatically update recipient status
+- **Smart Status Computation**: Real-time engagement classification (new → sent → delivered → engaged) ✅ **OPERATIONAL**
+- **Advanced Filtering**: Multi-criteria filtering with pagination and sorting ✅ **OPERATIONAL**
+- **Bulk Operations**: Soft delete, bulk move, restore with transaction safety ✅ **OPERATIONAL**
+- **Recycle Bin**: Safety-first approach with accident recovery ✅ **OPERATIONAL**
+- **Engagement Tracking**: Click events automatically update recipient status ✅ **OPERATIONAL**
 
 ### **📈 Google Analytics Integration**
-- **SendGrid-Style UTM Control**: Customer manages their own GA parameters
-- **Dual Attribution**: Platform tracking + customer GA attribution simultaneously
-- **UTM Preservation**: Existing customer UTMs never overwritten
-- **Campaign-Level Configuration**: Per-campaign GA settings with full transparency
+- **SendGrid-Style UTM Control**: Customer manages their own GA parameters ✅ **OPERATIONAL**
+- **Dual Attribution**: Platform tracking + customer GA attribution simultaneously ✅ **OPERATIONAL**
+- **UTM Preservation**: Existing customer UTMs never overwritten ✅ **OPERATIONAL**
+- **Campaign-Level Configuration**: Per-campaign GA settings with full transparency ✅ **OPERATIONAL**
 
 ### **🎯 Production-Ready Campaign System**
 - **Visual Campaign Builder**: Material-UI integrated campaign creation workflow
@@ -74,7 +108,7 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 
 ### **🛡️ Enterprise Security & Compliance**
 - **Security Validation**: HTML size caps, DOM node limits, suspicious pattern detection
-- **JWT Click Tracking**: Signed tokens with tenant isolation and expiration
+- **JWT Click Tracking**: Signed tokens with tenant isolation and expiration ✅ **OPERATIONAL**
 - **Customer-Scoped Suppressions**: Industry-standard unsubscribe management
 - **GDPR Ready**: Soft delete patterns with data retention controls
 - **Audit Logging**: Complete activity tracking with tenant isolation
@@ -87,9 +121,9 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 
 ---
 
-## 🔌 **Plugin Architecture**
+## 🔌 **Module Architecture**
 
-### **How It Plugs Into Motorical**
+### **How It Integrates With Motorical**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -108,7 +142,7 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
         └─────────────────────────────────────────────────┘
                            │
 ┌─────────────────────────────────────────────────────────────┐
-│                Communications Block Plugin                 │
+│                Communications Block Module                 │
 ├─────────────────┬─────────────────┬─────────────────────────┤
 │ Comm API        │ Comm Database   │ Background Workers      │
 │ Port 3011       │ communications  │ Sender + Stats          │
@@ -122,16 +156,18 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 |-------------|------|-------------|
 | **Authentication** | HTTP API | Tenant provisioning via `X-Internal-Token` |
 | **Frontend** | Reverse Proxy | Nginx routes `/comm-api/*` to Communications Block |
-| **Email Delivery** | REST API | Uses Motorical's `/v1/send` endpoint for email delivery |
-| **Analytics** | Webhook | Receives delivery events from Motorical platform |
+| **Email Delivery** | Direct DB + Queue | Inserts into `motorical_db.email_logs` and LPUSHes to Redis `email_delivery_queue` via selected motor block |
+| **Analytics** | Webhook + API | Receives delivery events from Motorical platform and polls API for logs |
+| **Account System** | Database | Uses `motorical_account_id` for tenant scoping and suppressions |
 
-### **🎯 Plugin Benefits**
+### **🎯 Module Benefits**
 
 - **✅ Independent Deployment**: Deploy, update, scale independently
-- **✅ Zero Downtime**: Add/remove without affecting core Motorical services  
 - **✅ Separate Repository**: Own git history, releases, and development cycle
 - **✅ Custom Database**: Isolated data with own backup/recovery procedures
 - **✅ Modular Features**: Enable only the marketing features you need
+- **✅ Deep Integration**: Direct access to Motorical infrastructure for optimal performance
+- **✅ Transparent Architecture**: Open source code demonstrates integration patterns
 
 ---
 
@@ -140,15 +176,18 @@ The Communications Block leverages the powerful **Motorical** email delivery pla
 ### **Prerequisites**
 
 - **Motorical Platform**: Running Motorical email infrastructure ([Get Motorical](https://motorical.com))
+  - **Required**: Access to `motorical_db` database
+  - **Required**: Access to Motorical's Redis `email_delivery_queue`
+  - **Required**: Motorical account system (`motorical_account_id`)
 - **Node.js**: v20+ 
-- **PostgreSQL**: v15+
-- **Redis**: v6+ (for background job processing)
+- **PostgreSQL**: v15+ (for Communications Block database + access to Motorical database)
+- **Redis**: v6+ (shared with Motorical platform)
 - **Nginx**: For reverse proxy (or similar load balancer)
 
 ### **Installation**
 
 ```bash
-# 1. Clone the plugin repository
+# 1. Clone the module repository
 git clone https://github.com/gliepins/marketing-motorical.git
 cd marketing-motorical
 
@@ -182,11 +221,14 @@ curl -f http://localhost:3011/api/health
 ### **Environment Variables**
 
 ```bash
-# Communications Block Configuration
+# Communications Block (own DB)
 COMM_PORT=3011
-COMM_DB_URL=postgresql://user:pass@localhost:5432/communications_db
+COMM_DB_URL=postgresql://comm_user:password@localhost:5432/communications_db
 
-# Motorical Integration
+# Motorical Platform (main DB) for delivery queue
+MOTORICAL_DB_URL=postgresql://motorical:password@localhost:5432/motorical_db
+
+# Motorical Integration (optional REST helpers)
 MOTORICAL_API_BASE=https://api.motorical.com
 MOTORICAL_API_KEY=mb_your_api_key
 COMM_INTERNAL_TOKEN=your_secure_internal_token
@@ -195,9 +237,25 @@ COMM_INTERNAL_TOKEN=your_secure_internal_token
 COMM_FROM_ADDRESS=noreply@yourdomain.com
 COMM_PUBLIC_BASE=https://yourdomain.com
 
+# Sender transport toggle (default off)
+COMM_SMTP_ENABLE=false
+# If you ever enable SMTP fallback explicitly (not recommended):
+# COMM_SMTP_HOST=mail.motorical.com
+# COMM_SMTP_PORT=2587
+# COMM_SMTP_USER=...
+# COMM_SMTP_PASS=...
+
 # Security
 SERVICE_JWT_SECRET=your_jwt_secret
 ```
+
+### Sending Flow (v2.1)
+
+- Campaign carries a `motor_block_id` selection.
+- Sender worker compiles payload and enqueues delivery via Motorical pipeline:
+  - Insert row into `motorical_db.public.email_logs` with status `queued` and metadata.
+  - LPUSH JSON job to Redis list `email_delivery_queue` for the Delivery Engine.
+- SMTP fallback is disabled by default to prevent mismatch with campaign motor block selection.
 
 ### **Nginx Integration**
 
@@ -219,6 +277,8 @@ location /c/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_intercept_errors off;
+    # Prevent caching of dynamic redirects at edge/proxies
+    add_header Cache-Control "no-store" always;
 }
 
 # Unsubscribe tracking
@@ -229,8 +289,15 @@ location /t/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_intercept_errors off;
+    add_header Cache-Control "no-store" always;
 }
 ```
+
+#### Security Notes (track.motorical.com)
+- Behind Cloudflare, set SSL mode to Full (Strict) and bypass cache for `/c/*` and `/t/*`.
+- Do not enable features that inject scripts (e.g., Rocket Loader) to preserve strict CSP.
+- Keep JWT click tokens short‑lived and validate `iss`, `aud`, `exp`; redirect only to targets embedded in the signed token (no open redirects).
+- Preserve real client IP at origin with `real_ip_header CF-Connecting-IP` and `set_real_ip_from` for Cloudflare ranges.
 
 ### **v2.0 Technical Architecture**
 
@@ -443,6 +510,8 @@ sudo systemctl restart motorical-comm-api motorical-comm-sender motorical-comm-s
 
 ## 🤝 **Contributing**
 
+We welcome contributions! This open-source module demonstrates the Motorical ecosystem's extensibility and integration patterns.
+
 ```bash
 # Development setup
 git clone https://github.com/gliepins/marketing-motorical.git
@@ -451,18 +520,29 @@ npm install
 npm run dev
 ```
 
-### **Plugin Guidelines**
+### **Module Guidelines**
 
-- Maintain plugin boundaries: No direct connections to main Motorical DB
-- API-first integration: All communication via REST APIs
-- Environment-driven configuration: No hard-coded integration points
-- Independent deployability: Deploy without main platform changes
+- **Clear integration boundaries**: Direct access to `motorical_db` for `email_logs` and account system
+- **Platform queue integration**: Uses Motorical's `email_delivery_queue` for email delivery
+- **Environment-driven configuration**: Configuration via environment variables
+- **Independent deployability**: Deploy without main platform changes
+- **Support multiple infrastructures**: Works with SMTP gateways, IMAP mailboxes, and standard email systems
+- **Transparency first**: Code should be clear, documented, and demonstrate integration patterns
+
+### **Why Contribute?**
+
+- **🌍 Real-World Impact**: Your contributions help real businesses send better emails
+- **📚 Learning Opportunity**: Understand production-grade email marketing systems
+- **🔍 Transparency**: Help demonstrate open, extensible architecture
+- **🚀 Innovation**: Shape the future of email marketing automation
 
 ---
 
 ## 📝 **License**
 
 MIT License - see [LICENSE](LICENSE) file for details.
+
+This open-source module is provided to demonstrate transparency and the module architecture approach. The main Motorical platform remains closed-source.
 
 ---
 
@@ -474,8 +554,24 @@ Ready to supercharge your email infrastructure?
 
 📧 **Contact**: [support@motorical.com](mailto:support@motorical.com)  
 🌐 **Website**: [https://motorical.com](https://motorical.com)  
-📚 **Documentation**: [https://docs.motorical.com](https://docs.motorical.com)
+📚 **Documentation**: [https://docs.motorical.com](https://docs.motorical.com)  
+💻 **GitHub**: [https://github.com/gliepins/marketing-motorical](https://github.com/gliepins/marketing-motorical)
 
 ---
 
-**Built with ❤️ for the Motorical ecosystem**
+## 🔍 **Transparency & Openness**
+
+This repository is **public** to demonstrate:
+
+- **🏗️ Architecture Transparency**: See how modules integrate with the Motorical ecosystem
+- **📚 Educational Value**: Learn from production-ready email marketing code
+- **🔌 Module Pattern**: Understand the integration architecture and patterns
+- **🤝 Community Trust**: Open codebase shows our commitment to transparency
+
+**Note**: While this module is open-source, the main Motorical platform (backend API, frontend, SMTP gateway, delivery engine) remains closed-source for business reasons. This module serves as a **reference implementation** showing how the ecosystem works.
+
+**Integration Depth**: This is a **tightly integrated module** that requires Motorical's database, queue system, and account infrastructure. See [PLUGGABILITY_ASSESSMENT.md](PLUGGABILITY_ASSESSMENT.md) for detailed analysis of integration points and dependencies.
+
+---
+
+**Built with ❤️ for the Motorical ecosystem | Open source for transparency**
