@@ -70,7 +70,10 @@ router.patch('/api/settings/unsubscribe', requireTenant, async (req, res) => {
 
 // Helper used later by sender to generate tokens (exported)
 export function signUnsubscribeToken({ tenantId, campaignId, contactId, ttl = '7d' }) {
-  const secret = process.env.SERVICE_JWT_SECRET || 'dev-secret';
+  const secret = process.env.SERVICE_JWT_SECRET;
+  if (!secret) {
+    throw new Error('SERVICE_JWT_SECRET environment variable is required for token signing');
+  }
   return jwt.sign({ tenantId, campaignId, contactId, t: 'unsub' }, secret, { expiresIn: ttl });
 }
 
@@ -127,16 +130,137 @@ async function getTenantSettings(tenantId) {
 async function handleUnsub(req, res) {
   try {
     const { token } = req.params;
-    const secret = process.env.SERVICE_JWT_SECRET || 'dev-secret';
+    const secret = process.env.SERVICE_JWT_SECRET;
+    if (!secret) {
+      res.status(500).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configuration Error</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #ef4444; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
+    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
+    p { color: #6b7280; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">⚠</div>
+    <h1>Configuration Error</h1>
+    <p>Server configuration error: JWT secret not configured.</p>
+  </div>
+</body>
+</html>`);
+      return;
+    }
     let decoded;
     try {
       decoded = jwt.verify(token, secret);
     } catch (err) {
-      res.status(400).send('<html><body>Unsubscribe link invalid or expired.</body></html>');
+      res.status(400).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Invalid Link</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
+    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
+    p { color: #6b7280; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">⚠</div>
+    <h1>Invalid or Expired Link</h1>
+    <p>This unsubscribe link is invalid or has expired. Please contact the sender directly if you wish to unsubscribe.</p>
+  </div>
+</body>
+</html>`);
       return;
     }
     if (decoded.t !== 'unsub') {
-      res.status(400).send('<html><body>Invalid unsubscribe token.</body></html>');
+      res.status(400).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Invalid Token</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
+    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
+    p { color: #6b7280; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">⚠</div>
+    <h1>Invalid Unsubscribe Token</h1>
+    <p>This unsubscribe link is not valid. Please contact the sender directly if you wish to unsubscribe.</p>
+  </div>
+</body>
+</html>`);
       return;
     }
     const tenantId = decoded.tenantId;
@@ -160,13 +284,177 @@ async function handleUnsub(req, res) {
 
     // Motorical-hosted confirmation
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(`<!doctype html><html><head><meta charset="utf-8"><title>Unsubscribed</title></head><body>
-      <h3>You've been unsubscribed.</h3>
-      <p>${masked ? `Address: ${masked}` : ''}</p>
-      <p>Status: unsubscribed</p>
-    </body></html>`);
+    res.send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unsubscribed Successfully</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      line-height: 1.6;
+      color: #333;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 24px;
+      background: #10b981;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+    }
+    h1 {
+      font-size: 28px;
+      font-weight: 600;
+      color: #1f2937;
+      margin-bottom: 16px;
+    }
+    .message {
+      color: #6b7280;
+      font-size: 16px;
+      margin-bottom: 24px;
+    }
+    .info-box {
+      background: #f9fafb;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 24px;
+      text-align: left;
+    }
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .info-item:last-child {
+      border-bottom: none;
+    }
+    .info-label {
+      font-weight: 500;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .info-value {
+      color: #1f2937;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .status-badge {
+      display: inline-block;
+      background: #d1fae5;
+      color: #065f46;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .footer {
+      margin-top: 32px;
+      padding-top: 24px;
+      border-top: 1px solid #e5e7eb;
+      color: #9ca3af;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">✓</div>
+    <h1>You've been unsubscribed</h1>
+    <p class="message">You will no longer receive emails from this sender.</p>
+    ${masked ? `
+    <div class="info-box">
+      <div class="info-item">
+        <span class="info-label">Email Address</span>
+        <span class="info-value">${masked}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Status</span>
+        <span class="status-badge">Unsubscribed</span>
+      </div>
+    </div>
+    ` : `
+    <div class="info-box">
+      <div class="info-item">
+        <span class="info-label">Status</span>
+        <span class="status-badge">Unsubscribed</span>
+      </div>
+    </div>
+    `}
+    <div class="footer">
+      <p>This change takes effect immediately. If you have any questions, please contact the sender directly.</p>
+    </div>
+  </div>
+</body>
+</html>`);
   } catch (e) {
-    res.status(500).send('<html><body>Unsubscribe failed. Please try again later.</body></html>');
+    res.status(500).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Error</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #ef4444; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
+    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
+    p { color: #6b7280; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">✕</div>
+    <h1>Unsubscribe Failed</h1>
+    <p>We encountered an error processing your unsubscribe request. Please try again later or contact the sender directly.</p>
+  </div>
+</body>
+</html>`);
   }
 }
 
@@ -175,7 +463,7 @@ router.post('/t/u/:token', handleUnsub);
 
 // Helper used by sender to generate click tracking tokens
 export function signClickToken({ tenantId, campaignId, contactId, originalUrl, linkIndex, ttl = '90d' }) {
-  const secret = process.env.SERVICE_JWT_SECRET || 'dev-secret';
+  const secret = process.env.SERVICE_JWT_SECRET;
   return jwt.sign({ 
     tenantId, 
     campaignId, 
@@ -220,7 +508,7 @@ async function handleClick(req, res) {
   try {
     const { token } = req.params;
     const { url } = req.query;
-    const secret = process.env.SERVICE_JWT_SECRET || 'dev-secret';
+    const secret = process.env.SERVICE_JWT_SECRET;
     
     let decoded;
     try {
@@ -280,6 +568,8 @@ async function handleClick(req, res) {
 
 router.get('/c/:token', handleClick);
 router.post('/c/:token', handleClick);
+
+router.get('/t/u/:token', handleUnsub);
 
 export default router;
 

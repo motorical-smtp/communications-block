@@ -19,7 +19,7 @@ function requireTenant(req, res, next) {
 
 router.post('/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const { name, template_id, list_ids, motor_block_id, google_analytics } = req.body || {};
+    const { name, template_id, list_ids, motor_block_id, google_analytics, from_address, from_name } = req.body || {};
     if (!name || !template_id || !Array.isArray(list_ids) || list_ids.length === 0 || !motor_block_id) {
       return res.status(400).json({ success: false, error: 'name, template_id, motor_block_id, list_ids[] required' });
     }
@@ -30,11 +30,19 @@ router.post('/campaigns', requireTenant, requireEntitledTenant, async (req, res)
       ...google_analytics
     };
     
+    // Validate from_address format if provided
+    if (from_address && typeof from_address === 'string' && from_address.trim()) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(from_address.trim())) {
+        return res.status(400).json({ success: false, error: 'Invalid from_address format. Must be a valid email address.' });
+      }
+    }
+    
     const c = await query(
-      `INSERT INTO campaigns (tenant_id, name, template_id, motor_block_id, google_analytics)
-       VALUES ($1,$2,$3,$4,$5)
-       RETURNING id, name, template_id, motor_block_id, status, created_at, google_analytics`,
-      [req.tenantId, name, template_id, motor_block_id, JSON.stringify(gaSettings)]
+      `INSERT INTO campaigns (tenant_id, name, template_id, motor_block_id, google_analytics, from_address, from_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, name, template_id, motor_block_id, status, created_at, google_analytics, from_address, from_name`,
+      [req.tenantId, name, template_id, motor_block_id, JSON.stringify(gaSettings), from_address?.trim() || null, from_name?.trim() || null]
     );
     const campaignId = c.rows[0].id;
     for (const lid of list_ids) {
@@ -61,7 +69,7 @@ router.post('/campaigns', requireTenant, requireEntitledTenant, async (req, res)
 
 router.patch('/campaigns/:id/settings', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const { chunk_size, delay_seconds_between_chunks, timezone, scheduled_at, clear_scheduled } = req.body || {};
+    const { chunk_size, delay_seconds_between_chunks, timezone, scheduled_at, clear_scheduled, from_address, from_name } = req.body || {};
     // Keep original string; we'll cast in SQL ($3::timestamptz at time zone 'UTC')::timestamp
     let scheduledAtRaw = null;
     if (scheduled_at !== undefined) {
@@ -97,19 +105,38 @@ router.patch('/campaigns/:id/settings', requireTenant, requireEntitledTenant, as
        WHERE campaign_id=$1`,
       [req.params.id, Number.isFinite(cs) ? cs : null, Number.isFinite(ds) ? ds : null]
     );
-    // update tz/schedule on campaign
+    // Validate from_address format if provided
+    if (from_address !== undefined && from_address !== null) {
+      if (typeof from_address === 'string' && from_address.trim()) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(from_address.trim())) {
+          return res.status(400).json({ success: false, error: 'Invalid from_address format. Must be a valid email address.' });
+        }
+      } else if (from_address !== null) {
+        return res.status(400).json({ success: false, error: 'Invalid from_address format. Must be a valid email address or null.' });
+      }
+    }
+    
+    // update tz/schedule/from_address/from_name on campaign
     if (clear_scheduled === true) {
       await query(
-        `UPDATE campaigns SET timezone=COALESCE($2, timezone), scheduled_at=NULL WHERE id=$1 AND tenant_id=$3`,
-        [req.params.id, timezone || null, req.tenantId]
+        `UPDATE campaigns 
+         SET timezone=COALESCE($2, timezone), 
+             scheduled_at=NULL,
+             from_address=COALESCE($4, from_address),
+             from_name=COALESCE($5, from_name)
+         WHERE id=$1 AND tenant_id=$3`,
+        [req.params.id, timezone || null, req.tenantId, from_address !== undefined ? (from_address?.trim() || null) : undefined, from_name !== undefined ? (from_name?.trim() || null) : undefined]
       );
     } else {
       await query(
         `UPDATE campaigns 
          SET timezone=COALESCE($2, timezone),
-             scheduled_at=COALESCE($3::timestamp, scheduled_at)
+             scheduled_at=COALESCE($3::timestamp, scheduled_at),
+             from_address=COALESCE($5, from_address),
+             from_name=COALESCE($6, from_name)
          WHERE id=$1 AND tenant_id=$4`,
-        [req.params.id, timezone || null, scheduledAtRaw || null, req.tenantId]
+        [req.params.id, timezone || null, scheduledAtRaw || null, req.tenantId, from_address !== undefined ? (from_address?.trim() || null) : undefined, from_name !== undefined ? (from_name?.trim() || null) : undefined]
       );
     }
     res.json({ success: true, message: 'Settings updated' });
@@ -137,11 +164,33 @@ router.post('/campaigns/:id/cancel', requireTenant, requireEntitledTenant, async
   }
 });
 
+// GET /api/campaigns/deleted - List soft-deleted campaigns for potential restoration
+router.get('/campaigns/deleted', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const r = await query(`SELECT id, name, template_id, motor_block_id, status, 
+                           deleted_at, created_at 
+                           FROM campaigns 
+                           WHERE tenant_id=$1 AND deleted_at IS NOT NULL 
+                           ORDER BY deleted_at DESC 
+                           LIMIT 50`, [req.tenantId]);
+    
+    res.json({ success: true, data: r.rows });
+  } catch (e) {
+    logger.error({ error: e, tenantId: req.tenantId }, 'Failed to fetch deleted campaigns');
+    res.status(500).json({ success: false, error: 'Failed to fetch deleted campaigns' });
+  }
+});
+
 router.get('/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const r = await query(`SELECT id, name, template_id, motor_block_id, status, google_analytics,
-                           CASE WHEN scheduled_at IS NOT NULL THEN to_char(scheduled_at::timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ELSE NULL END as scheduled_at, 
-                           created_at FROM campaigns WHERE tenant_id=$1 ORDER BY created_at DESC`, [req.tenantId]);
+    const r = await query(`SELECT c.id, c.name, c.template_id, c.motor_block_id, c.status, c.google_analytics, c.from_address, c.from_name,
+                           CASE WHEN c.scheduled_at IS NOT NULL THEN to_char(c.scheduled_at::timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ELSE NULL END as scheduled_at, 
+                           c.created_at,
+                           COALESCE(css.chunk_size, 100) as chunk_size,
+                           COALESCE(css.delay_seconds_between_chunks, 30) as delay_seconds_between_chunks
+                           FROM campaigns c
+                           LEFT JOIN campaign_send_settings css ON css.campaign_id = c.id
+                           WHERE c.tenant_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC`, [req.tenantId]);
     
     // Enrich with latest artifacts and snapshots for each campaign
     const enrichedCampaigns = await Promise.all(r.rows.map(async (campaign) => {
@@ -158,9 +207,9 @@ router.get('/campaigns', requireTenant, requireEntitledTenant, async (req, res) 
 
 router.get('/campaigns/:id', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const r = await query(`SELECT id, name, template_id, motor_block_id, status, google_analytics, timezone, 
+    const r = await query(`SELECT id, name, template_id, motor_block_id, status, google_analytics, timezone, from_address, from_name,
                            CASE WHEN scheduled_at IS NOT NULL THEN to_char(scheduled_at::timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ELSE NULL END as scheduled_at, 
-                           created_at FROM campaigns WHERE tenant_id=$1 AND id=$2`, [req.tenantId, req.params.id]);
+                           created_at FROM campaigns WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, [req.tenantId, req.params.id]);
     if (r.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
     // Attach latest compile info (if any)
     const latestArtifact = await getLatestArtifact(req.params.id, req.tenantId);
@@ -180,7 +229,7 @@ router.get('/campaigns/:id/events', requireTenant, requireEntitledTenant, async 
     const status = (req.query.status || '').trim().toLowerCase();
 
     // Ensure ownership
-    const c = await query('SELECT id FROM campaigns WHERE id=$1 AND tenant_id=$2', [campaignId, req.tenantId]);
+    const c = await query('SELECT id FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [campaignId, req.tenantId]);
     if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
 
     const params = [campaignId];
@@ -208,9 +257,9 @@ router.get('/campaigns/:id/events', requireTenant, requireEntitledTenant, async 
 
 router.delete('/campaigns/:id', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    // Ensure campaign belongs to tenant
-    const c = await query('SELECT id, status FROM campaigns WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
-    if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
+    // Ensure campaign belongs to tenant and is not already soft-deleted
+    const c = await query('SELECT id, status FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [req.params.id, req.tenantId]);
+    if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found or already deleted' });
 
     // Optional: prevent deletion if actively sending (basic safeguard)
     const status = c.rows[0].status;
@@ -218,27 +267,135 @@ router.delete('/campaigns/:id', requireTenant, requireEntitledTenant, async (req
       return res.status(409).json({ success: false, error: 'Cannot delete a campaign that is currently sending' });
     }
 
-    // Cleanup dependents first (defensive)
-    await query('DELETE FROM campaign_send_settings WHERE campaign_id=$1', [req.params.id]);
-    await query('DELETE FROM campaign_lists WHERE campaign_id=$1', [req.params.id]);
-    await query('DELETE FROM email_events WHERE campaign_id=$1', [req.params.id]);
-    // Finally delete campaign
-    await query('DELETE FROM campaigns WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
+    // Soft delete: set deleted_at timestamp instead of hard delete
+    await query('UPDATE campaigns SET deleted_at = NOW() WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
 
-    res.json({ success: true, message: 'Campaign deleted' });
+    logger.info({ campaignId: req.params.id, tenantId: req.tenantId }, 'Campaign soft deleted');
+    res.json({ success: true, message: 'Campaign deleted successfully' });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Failed to delete campaign' });
   }
 });
 
-// GET /api/campaigns/:id/stats — totals from synced events (queued/sent/delivered/bounced)
+// PATCH /api/campaigns/:id/restore - Restore a soft-deleted campaign
+router.patch('/campaigns/:id/restore', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    // Ensure campaign belongs to tenant and is soft-deleted
+    const c = await query('SELECT id, status FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NOT NULL', [req.params.id, req.tenantId]);
+    if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found or not deleted' });
+
+    // Restore campaign: clear deleted_at timestamp
+    await query('UPDATE campaigns SET deleted_at = NULL WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
+
+    logger.info({ campaignId: req.params.id, tenantId: req.tenantId }, 'Campaign restored from soft delete');
+    res.json({ success: true, message: 'Campaign restored successfully' });
+  } catch (e) {
+    logger.error({ error: e, campaignId: req.params.id, tenantId: req.tenantId }, 'Failed to restore campaign');
+    res.status(500).json({ success: false, error: 'Failed to restore campaign' });
+  }
+});
+
+// DELETE /api/campaigns/:id/permanent - Permanently delete a soft-deleted campaign (hard delete)
+router.delete('/campaigns/:id/permanent', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    // Ensure campaign belongs to tenant and is soft-deleted
+    const c = await query('SELECT id, status, name FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NOT NULL', [req.params.id, req.tenantId]);
+    if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found in recycle bin' });
+
+    const campaignName = c.rows[0].name;
+
+    // Hard delete: Remove all related data (CASCADE will handle most relationships)
+    await query('DELETE FROM campaign_send_settings WHERE campaign_id=$1', [req.params.id]);
+    await query('DELETE FROM campaign_lists WHERE campaign_id=$1', [req.params.id]);
+    await query('DELETE FROM comm_audience_snapshots WHERE campaign_id=$1', [req.params.id]);
+    await query('DELETE FROM comm_campaign_artifacts WHERE campaign_id=$1', [req.params.id]);
+    await query('DELETE FROM email_events WHERE campaign_id=$1', [req.params.id]);
+    
+    // Finally delete the campaign itself
+    await query('DELETE FROM campaigns WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
+
+    logger.info({ campaignId: req.params.id, tenantId: req.tenantId, campaignName }, 'Campaign permanently deleted');
+    res.json({ success: true, message: 'Campaign permanently deleted' });
+  } catch (e) {
+    logger.error({ error: e, campaignId: req.params.id, tenantId: req.tenantId }, 'Failed to permanently delete campaign');
+    res.status(500).json({ success: false, error: 'Failed to permanently delete campaign' });
+  }
+});
+
+// DELETE /api/campaigns/cleanup - Bulk permanent delete of all soft-deleted campaigns
+router.delete('/campaigns/cleanup', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const { olderThanDays = 30 } = req.body || {};
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+
+    // Get campaigns to be permanently deleted
+    const campaignsToDelete = await query(
+      'SELECT id, name FROM campaigns WHERE tenant_id=$1 AND deleted_at IS NOT NULL AND deleted_at < $2',
+      [req.tenantId, cutoffDate.toISOString()]
+    );
+
+    if (campaignsToDelete.rowCount === 0) {
+      return res.json({ 
+        success: true, 
+        message: 'No campaigns found for cleanup',
+        deleted_count: 0 
+      });
+    }
+
+    const campaignIds = campaignsToDelete.rows.map(c => c.id);
+    const campaignNames = campaignsToDelete.rows.map(c => c.name);
+
+    // Batch delete related data
+    for (const campaignId of campaignIds) {
+      await query('DELETE FROM campaign_send_settings WHERE campaign_id=$1', [campaignId]);
+      await query('DELETE FROM campaign_lists WHERE campaign_id=$1', [campaignId]);
+      await query('DELETE FROM comm_audience_snapshots WHERE campaign_id=$1', [campaignId]);
+      await query('DELETE FROM comm_campaign_artifacts WHERE campaign_id=$1', [campaignId]);
+      await query('DELETE FROM email_events WHERE campaign_id=$1', [campaignId]);
+    }
+
+    // Delete the campaigns themselves
+    await query(
+      'DELETE FROM campaigns WHERE tenant_id=$1 AND deleted_at IS NOT NULL AND deleted_at < $2',
+      [req.tenantId, cutoffDate.toISOString()]
+    );
+
+    logger.info({ 
+      tenantId: req.tenantId, 
+      deletedCount: campaignsToDelete.rowCount,
+      campaignNames,
+      olderThanDays 
+    }, 'Bulk campaign cleanup completed');
+
+    res.json({ 
+      success: true, 
+      message: `Permanently deleted ${campaignsToDelete.rowCount} campaigns`,
+      deleted_count: campaignsToDelete.rowCount,
+      deleted_campaigns: campaignNames
+    });
+  } catch (e) {
+    logger.error({ error: e, tenantId: req.tenantId }, 'Failed to cleanup campaigns');
+    res.status(500).json({ success: false, error: 'Failed to cleanup campaigns' });
+  }
+});
+
+// GET /api/campaigns/:id/stats — totals from synced events (queued/sent/delivered/bounced/opened/clicked)
 router.get('/campaigns/:id/stats', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
     const campaignId = req.params.id;
     // Ensure campaign belongs to tenant
-    const own = await query('SELECT motor_block_id FROM campaigns WHERE id=$1 AND tenant_id=$2', [campaignId, req.tenantId]);
+    const own = await query('SELECT motor_block_id FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [campaignId, req.tenantId]);
     if (own.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
-    const mbId = own.rows[0].motor_block_id;
+
+    // Query email_events table directly to get accurate counts
+    const eventsResult = await query(
+      `SELECT type, COUNT(*) as count 
+       FROM email_events 
+       WHERE campaign_id = $1 AND tenant_id = $2 
+       GROUP BY type`,
+      [campaignId, req.tenantId]
+    );
 
     const totals = {
       queued: 0,
@@ -248,45 +405,71 @@ router.get('/campaigns/:id/stats', requireTenant, requireEntitledTenant, async (
       bounced: 0,
       complained: 0,
       failed: 0,
-      blocked: 0
+      blocked: 0,
+      opened: 0,
+      clicked: 0
     };
 
-    const API_BASE = process.env.MOTORICAL_API_BASE || 'https://api.motorical.com';
-    const PUBLIC_TOKEN = process.env.MOTORICAL_PUBLIC_API_TOKEN || '';
+    // Map event types to totals
+    eventsResult.rows.forEach(row => {
+      const type = String(row.type).toLowerCase();
+      const count = parseInt(row.count) || 0;
+      
+      if (type === 'queued') totals.queued = count;
+      else if (type === 'sending') totals.sending = count;
+      else if (type === 'sent') totals.sent = count;
+      else if (type === 'delivered') totals.delivered = count;
+      else if (type === 'bounced') totals.bounced = count;
+      else if (type === 'complained') totals.complained = count;
+      else if (type === 'failed') totals.failed = count;
+      else if (type === 'blocked') totals.blocked = count;
+      else if (type === 'opened') totals.opened = count;
+      else if (type === 'clicked') totals.clicked = count;
+    });
 
-    if (!PUBLIC_TOKEN) {
-      return res.json({ success: true, data: { totals } });
-    }
+    // Derive roll-up metrics expected by unified messaging / completion email service
+    const distinctResult = await query(
+      `SELECT COUNT(DISTINCT message_id) AS total
+       FROM email_events
+       WHERE campaign_id = $1 AND tenant_id = $2
+         AND message_id IS NOT NULL`,
+      [campaignId, req.tenantId]
+    );
 
-    // Pull recent logs and aggregate by campaign_id to mirror Analytics
-    const resp = await fetch(`${API_BASE}/api/public/v1/motor-blocks/${encodeURIComponent(mbId)}/logs?limit=1000`, { headers: { Authorization: `Bearer ${PUBLIC_TOKEN}` } });
-    if (resp.ok) {
-      const data = await resp.json();
-      const items = Array.isArray(data?.data?.items) ? data.data.items : [];
-      for (const item of items) {
-        let messageId = item?.messageId || item?.message_id || null;
-        if (typeof messageId === 'string') messageId = messageId.trim().replace(/^<|>$/g, '');
-        let campaignIdMeta = item?.metadata?.campaign_id || item?.metadata?.campaignId;
-        if (!campaignIdMeta && messageId) {
-          const map = await query('SELECT campaign_id FROM email_events WHERE message_id=$1 LIMIT 1', [messageId]);
-          campaignIdMeta = map.rows[0]?.campaign_id || null;
-        }
-        if (String(campaignIdMeta) !== String(campaignId)) continue;
+    const totalSent = parseInt(distinctResult.rows?.[0]?.total, 10) || 0;
+    const deliveredCount = totals.delivered || 0;
+    const bouncedCount = totals.bounced || 0;
+    const openedCount = totals.opened || 0;
+    const clickedCount = totals.clicked || 0;
 
-        const statusStr = String(item.status || item.classification || '').toLowerCase();
-        if (statusStr.includes('deliver')) totals.delivered++;
-        else if (statusStr.includes('accepted') || statusStr.includes('sent')) totals.sent++;
-        else if (statusStr.includes('bounce')) totals.bounced++;
-        else if (statusStr.includes('complain')) totals.complained++;
-        else if (statusStr.includes('fail')) totals.failed++;
-        else if (statusStr.includes('queue')) totals.queued++;
-      }
-    }
+    const pct = (num, denom) => {
+      if (!denom || denom <= 0) return 0;
+      return Math.round((num / denom) * 100);
+    };
+
+    const deliveryRate = pct(deliveredCount, totalSent);
+    const openRate = pct(openedCount, totalSent);
+    const clickRate = pct(clickedCount, totalSent);
 
     const analyticsDelivered = (totals.delivered || 0) + (totals.sent || 0);
-    res.json({ success: true, data: { totals: { ...totals, analyticsDelivered } } });
+
+    res.json({
+      success: true,
+      data: {
+        totals: { ...totals, analyticsDelivered },
+        total_sent: totalSent,
+        delivered: deliveredCount,
+        bounced: bouncedCount,
+        opened: openedCount,
+        clicked: clickedCount,
+        delivery_rate: deliveryRate,
+        open_rate: openRate,
+        click_rate: clickRate
+      }
+    });
   } catch (e) {
-    res.status(500).json({ success: false, error: 'Failed to fetch campaign stats' });
+    console.error('Campaign stats error:', e);
+    res.status(500).json({ success: false, error: 'Failed to fetch campaign stats', details: e.message });
   }
 });
 
@@ -295,7 +478,7 @@ router.get('/campaigns/:id/analytics', requireTenant, requireEntitledTenant, asy
   try {
     const days = Math.max(1, Math.min(30, parseInt(req.query.days) || 7));
     const campaignId = req.params.id;
-    const own = await query('SELECT motor_block_id FROM campaigns WHERE id=$1 AND tenant_id=$2', [campaignId, req.tenantId]);
+    const own = await query('SELECT motor_block_id FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [campaignId, req.tenantId]);
     if (own.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
     const mbId = own.rows[0].motor_block_id;
 
@@ -390,7 +573,7 @@ router.get('/campaigns/:id/recipients', requireTenant, requireEntitledTenant, as
     const campaignId = req.params.id;
     
     // Verify campaign ownership
-    const own = await query('SELECT motor_block_id FROM campaigns WHERE id=$1 AND tenant_id=$2', [campaignId, req.tenantId]);
+    const own = await query('SELECT motor_block_id FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [campaignId, req.tenantId]);
     if (own.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found' });
 
     // Get all potential recipients (same logic as sender worker)
@@ -451,7 +634,7 @@ router.post('/campaigns/:id/compile', requireTenant, requireEntitledTenant, asyn
     const campaignId = req.params.id;
     // Validate campaign and ownership
     const c = await query(
-      'SELECT c.id, c.tenant_id, c.template_id, c.status, c.google_analytics, t.name as template_name, t.subject, t.body_html, t.body_text\n       FROM campaigns c JOIN templates t ON t.id=c.template_id\n       WHERE c.id=$1 AND c.tenant_id=$2',
+      'SELECT c.id, c.tenant_id, c.template_id, c.status, c.google_analytics, t.name as template_name, t.subject, t.body_html, t.body_text\n       FROM campaigns c JOIN templates t ON t.id=c.template_id\n       WHERE c.id=$1 AND c.tenant_id=$2 AND c.deleted_at IS NULL',
       [campaignId, req.tenantId]
     );
     if (c.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found' });
@@ -551,6 +734,33 @@ router.post('/campaigns/:id/compile', requireTenant, requireEntitledTenant, asyn
 
     // Execute post-compile hooks and update artifact with processed content
     const campaign = c.rows[0];
+    // Google Analytics validation and warnings
+    const gaWarnings = [];
+    if (campaign.google_analytics?.enabled) {
+      logger.info({ campaignId, tenantId: req.tenantId }, 'Google Analytics enabled - UTM parameters will be added to links');
+      
+      // Add important warning about landing page requirements
+      gaWarnings.push({
+        type: 'ga_landing_page_requirement',
+        title: 'Google Analytics Landing Page Setup Required',
+        message: 'UTM parameters will be added to your links, but your landing pages must have Google Analytics tracking installed to capture this data.',
+        recommendation: 'Ensure all destination URLs have Google Analytics (gtag.js or GA4) properly configured with your Measurement ID.',
+        severity: 'warning',
+        action_required: true
+      });
+      
+      // Check if external domain links are being used
+      if (htmlCompiled && (htmlCompiled.includes('href="http') || htmlCompiled.includes("href='http"))) {
+        gaWarnings.push({
+          type: 'ga_domain_verification',
+          title: 'Verify Google Analytics on All Landing Domains',
+          message: 'Links point to external domains. Verify Google Analytics is installed on all destination websites.',
+          recommendation: 'Test UTM parameter tracking on your landing pages before sending the campaign.',
+          severity: 'info'
+        });
+      }
+    }
+
     const hookContext = {
       type: 'compile.completed',
       campaignId,
@@ -562,7 +772,8 @@ router.post('/campaigns/:id/compile', requireTenant, requireEntitledTenant, asyn
         name: campaign.template_name,
         google_analytics: campaign.google_analytics
       },
-      artifact: { subject, htmlCompiled, textCompiled }
+      artifact: { subject, htmlCompiled, textCompiled },
+      ga_warnings: gaWarnings
     };
     
     try {
@@ -592,7 +803,14 @@ router.post('/campaigns/:id/compile', requireTenant, requireEntitledTenant, asyn
       console.warn('Post-compile hooks failed:', hookError);
     }
 
-    res.json({ success: true, data: { version, totalRecipients } });
+    res.json({ 
+      success: true, 
+      data: { 
+        version, 
+        totalRecipients,
+        ga_warnings: gaWarnings.length > 0 ? gaWarnings : undefined
+      } 
+    });
   } catch (e) {
     console.error('Compile error:', e);
     res.status(500).json({ success: false, error: 'Failed to compile campaign', details: e.message });

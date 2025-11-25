@@ -30,11 +30,46 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
       date_from,       // created after this date
       date_to,         // created before this date
       search,          // search name or email
+      sort_by = 'created_at',  // column to sort by (or comma-separated for multi-sort)
+      sort_order = 'desc',     // asc or desc (or comma-separated for multi-sort)
       limit = 50,      // pagination
       offset = 0
     } = req.query;
 
     const tenantId = req.tenantId;
+    
+    // Define sortable columns with their corresponding SQL expressions
+    const sortableColumns = {
+      'email': 'rs.email',
+      'name': 'rs.name', 
+      'computed_status': 'rs.computed_status',
+      'engagement_level': 'rs.engagement_level',
+      'quality_index': 'rs.quality_index',
+      'created_at': 'rs.created_at',
+      'last_engagement_at': 'rs.last_engagement_at',
+      'last_click_at': 'rs.last_click_at',
+      'last_campaign_activity': 'rs.last_campaign_activity',
+      'email_domain': 'SUBSTRING(rs.email FROM \'@(.*)$\')',
+      'list_count': '(SELECT COUNT(*) FROM list_contacts lc WHERE lc.contact_id = rs.id AND lc.status = \'active\')'
+    };
+
+    // Build ORDER BY clause (support multiple columns)
+    const buildOrderBy = () => {
+      const sortColumns = sort_by.split(',').map(col => col.trim());
+      const sortOrders = sort_order.split(',').map(order => order.trim());
+      
+      const orderClauses = sortColumns.map((col, index) => {
+        const validColumn = sortableColumns[col] || sortableColumns['created_at'];
+        const validOrder = ['asc', 'desc'].includes((sortOrders[index] || 'desc').toLowerCase()) 
+          ? (sortOrders[index] || 'desc').toUpperCase() 
+          : 'DESC';
+        return `${validColumn} ${validOrder}`;
+      });
+      
+      return orderClauses.join(', ');
+    };
+    
+    const orderByClause = buildOrderBy();
     
     // Build WHERE conditions
     const conditions = ['rs.tenant_id = $1'];
@@ -155,7 +190,7 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
         (SELECT COUNT(*) FROM list_contacts lc WHERE lc.contact_id = rs.id AND lc.status = 'active') as list_count
       FROM recipient_status rs
       WHERE ${whereClause}
-      ORDER BY rs.created_at DESC
+      ORDER BY ${orderByClause}
       LIMIT $${limitParam} OFFSET $${offsetParam}
     `;
 
@@ -174,6 +209,11 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
         filters_applied: {
           status, engagement, suppressed, campaign_id, email_domain, 
           date_from, date_to, search
+        },
+        sorting: {
+          sort_by: sort_by,
+          sort_order: sort_order.toLowerCase(),
+          available_columns: Object.keys(sortableColumns)
         }
       }
     });
@@ -184,6 +224,41 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
       success: false,
       error: 'Failed to fetch recipients',
       details: error.message
+    });
+  }
+});
+
+// GET /api/recipients/campaigns - Get campaigns with recipient counts for filtering
+router.get('/recipients/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    
+    const campaignsQuery = `
+      SELECT 
+        c.id,
+        c.name,
+        c.status,
+        c.created_at,
+        COUNT(DISTINCT ee.contact_id) as recipient_count
+      FROM campaigns c
+      LEFT JOIN email_events ee ON ee.campaign_id = c.id AND ee.tenant_id = c.tenant_id
+      WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
+      GROUP BY c.id, c.name, c.status, c.created_at
+      HAVING COUNT(DISTINCT ee.contact_id) > 0
+      ORDER BY c.created_at DESC
+    `;
+    
+    const campaigns = await query(campaignsQuery, [tenantId]);
+    
+    res.json({
+      success: true,
+      data: campaigns.rows
+    });
+  } catch (error) {
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to get campaigns for filtering');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve campaign filter options' 
     });
   }
 });
@@ -381,12 +456,11 @@ router.post('/recipients/bulk-delete', requireTenant, requireEntitledTenant, asy
       });
     }
 
-    // Soft delete: update contact status instead of hard delete
+    // Soft delete: set deleted_at timestamp for recycle bin
     const result = await query(
       `UPDATE contacts 
-       SET status = 'deleted', 
-           updated_at = NOW()
-       WHERE id = ANY($1) AND tenant_id = $2 AND status != 'deleted'
+       SET deleted_at = NOW()
+       WHERE id = ANY($1) AND tenant_id = $2 AND deleted_at IS NULL
        RETURNING id, email, name`,
       [recipient_ids, tenantId]
     );
@@ -507,48 +581,6 @@ router.post('/recipients/bulk-move', requireTenant, requireEntitledTenant, async
   }
 });
 
-// GET /api/recipients/deleted - View soft-deleted recipients (recycle bin)
-router.get('/recipients/deleted', requireTenant, requireEntitledTenant, async (req, res) => {
-  try {
-    const { limit = 50, offset = 0 } = req.query;
-    const tenantId = req.tenantId;
-
-    const result = await query(
-      `SELECT id, email, name, updated_at as deleted_at, quality_index
-       FROM contacts 
-       WHERE tenant_id = $1 AND status = 'deleted'
-       ORDER BY updated_at DESC
-       LIMIT $2 OFFSET $3`,
-      [tenantId, limit, offset]
-    );
-
-    const countResult = await query(
-      'SELECT COUNT(*) as total FROM contacts WHERE tenant_id = $1 AND status = \'deleted\'',
-      [tenantId]
-    );
-
-    res.json({
-      success: true,
-      data: {
-        recipients: result.rows,
-        pagination: {
-          total: parseInt(countResult.rows[0].total),
-          limit: parseInt(limit),
-          offset: parseInt(offset),
-          has_more: parseInt(countResult.rows[0].total) > parseInt(offset) + parseInt(limit)
-        }
-      }
-    });
-
-  } catch (error) {
-    logger.error({ tenantId: req.tenantId, error: error.message }, 'Failed to get deleted recipients');
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get deleted recipients',
-      details: error.message
-    });
-  }
-});
 
 // POST /api/recipients/restore - Restore recipients from recycle bin
 router.post('/recipients/restore', requireTenant, requireEntitledTenant, async (req, res) => {
@@ -565,8 +597,8 @@ router.post('/recipients/restore', requireTenant, requireEntitledTenant, async (
 
     const result = await query(
       `UPDATE contacts 
-       SET status = 'active', updated_at = NOW()
-       WHERE id = ANY($1) AND tenant_id = $2 AND status = 'deleted'
+       SET deleted_at = NULL
+       WHERE id = ANY($1) AND tenant_id = $2 AND deleted_at IS NOT NULL
        RETURNING id, email, name`,
       [recipient_ids, tenantId]
     );
@@ -590,6 +622,183 @@ router.post('/recipients/restore', requireTenant, requireEntitledTenant, async (
       success: false,
       error: 'Failed to restore recipients',
       details: error.message
+    });
+  }
+});
+
+// GET /api/recipients/deleted - Get soft-deleted recipients
+router.get('/recipients/deleted', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    
+    const query_text = `
+      SELECT 
+        c.id,
+        c.email,
+        c.name,
+        c.status as contact_status,
+        c.quality_index,
+        c.deleted_at,
+        c.created_at,
+        SPLIT_PART(c.email, '@', 2) as email_domain
+      FROM contacts c
+      WHERE c.tenant_id = $1 AND c.deleted_at IS NOT NULL
+      ORDER BY c.deleted_at DESC
+      LIMIT 100
+    `;
+    
+    const result = await query(query_text, [tenantId]);
+    
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to get deleted recipients');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve deleted recipients' 
+    });
+  }
+});
+
+// PATCH /api/recipients/:id/restore - Restore a soft-deleted recipient
+router.patch('/recipients/:id/restore', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const contactId = req.params.id;
+    const tenantId = req.tenantId;
+    
+    // Ensure contact belongs to tenant and is soft-deleted
+    const contact = await query(
+      'SELECT id, email FROM contacts WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NOT NULL',
+      [contactId, tenantId]
+    );
+    
+    if (contact.rowCount === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Contact not found in recycle bin' 
+      });
+    }
+    
+    // Restore contact: clear deleted_at timestamp
+    await query(
+      'UPDATE contacts SET deleted_at = NULL WHERE id=$1 AND tenant_id=$2',
+      [contactId, tenantId]
+    );
+    
+    logger.info({ contactId, tenantId, email: contact.rows[0].email }, 'Contact restored from soft delete');
+    res.json({ 
+      success: true, 
+      message: 'Contact restored successfully' 
+    });
+  } catch (error) {
+    logger.error({ error, contactId: req.params.id, tenantId: req.tenantId }, 'Failed to restore contact');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to restore contact' 
+    });
+  }
+});
+
+// DELETE /api/recipients/:id/permanent - Permanently delete a soft-deleted recipient
+router.delete('/recipients/:id/permanent', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const contactId = req.params.id;
+    const tenantId = req.tenantId;
+    
+    // Ensure contact belongs to tenant and is soft-deleted
+    const contact = await query(
+      'SELECT id, email FROM contacts WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NOT NULL',
+      [contactId, tenantId]
+    );
+    
+    if (contact.rowCount === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Contact not found in recycle bin' 
+      });
+    }
+    
+    const email = contact.rows[0].email;
+    
+    // Hard delete: Remove from list associations first (CASCADE will handle)
+    await query('DELETE FROM list_contacts WHERE contact_id=$1', [contactId]);
+    
+    // Remove any email events for this contact
+    await query('DELETE FROM email_events WHERE contact_id=$1', [contactId]);
+    
+    // Finally delete the contact
+    await query('DELETE FROM contacts WHERE id=$1 AND tenant_id=$2', [contactId, tenantId]);
+    
+    logger.info({ contactId, tenantId, email }, 'Contact permanently deleted');
+    res.json({ 
+      success: true, 
+      message: 'Contact permanently deleted' 
+    });
+  } catch (error) {
+    logger.error({ error, contactId: req.params.id, tenantId: req.tenantId }, 'Failed to permanently delete contact');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to permanently delete contact' 
+    });
+  }
+});
+
+// DELETE /api/recipients/cleanup - Bulk permanent delete of soft-deleted recipients
+router.delete('/recipients/cleanup', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const { olderThanDays = 30 } = req.body || {};
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+    
+    // Get contacts to be permanently deleted
+    const contactsToDelete = await query(
+      'SELECT id, email FROM contacts WHERE tenant_id=$1 AND deleted_at IS NOT NULL AND deleted_at < $2',
+      [tenantId, cutoffDate.toISOString()]
+    );
+    
+    if (contactsToDelete.rowCount === 0) {
+      return res.json({ 
+        success: true, 
+        message: 'No contacts found for cleanup',
+        deleted_count: 0 
+      });
+    }
+    
+    const contactIds = contactsToDelete.rows.map(c => c.id);
+    const emails = contactsToDelete.rows.map(c => c.email);
+    
+    // Batch delete related data
+    for (const contactId of contactIds) {
+      await query('DELETE FROM list_contacts WHERE contact_id=$1', [contactId]);
+      await query('DELETE FROM email_events WHERE contact_id=$1', [contactId]);
+    }
+    
+    // Delete the contacts themselves
+    await query(
+      'DELETE FROM contacts WHERE tenant_id=$1 AND deleted_at IS NOT NULL AND deleted_at < $2',
+      [tenantId, cutoffDate.toISOString()]
+    );
+    
+    logger.info({ 
+      tenantId, 
+      deletedCount: contactsToDelete.rowCount,
+      emails: emails.slice(0, 10), // Log first 10 emails
+      olderThanDays 
+    }, 'Bulk contact cleanup completed');
+    
+    res.json({ 
+      success: true, 
+      message: `Permanently deleted ${contactsToDelete.rowCount} contacts`,
+      deleted_count: contactsToDelete.rowCount
+    });
+  } catch (error) {
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to cleanup contacts');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to cleanup contacts' 
     });
   }
 });

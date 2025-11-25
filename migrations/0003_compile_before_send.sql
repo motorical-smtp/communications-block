@@ -1,3 +1,5 @@
+
+
 -- Compile-Before-Send schema additions
 -- Tables: comm_campaign_artifacts, comm_audience_snapshots
 

@@ -59,6 +59,15 @@ app.use('/api/suppressions', suppressionsRouter);
 app.use('/', webhooksRouter);
 app.use('/', trackingRouter);
 
+// 404 handler for unmatched routes
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Route not found',
+    path: req.path,
+    method: req.method
+  });
+});
+
 const port = Number(process.env.COMM_PORT || 3011);
 app.listen(port, () => {
   logger.info({ port }, 'communications-block api started');

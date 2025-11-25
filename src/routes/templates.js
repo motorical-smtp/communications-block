@@ -52,10 +52,18 @@ router.delete('/templates/:id', requireTenant, requireEntitledTenant, async (req
   try {
     const chk = await query('SELECT id FROM templates WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
     if (chk.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
-    await query('DELETE FROM templates WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
-    res.json({ success: true, message: 'Template deleted' });
+    try {
+      await query('DELETE FROM templates WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
+      return res.json({ success: true, message: 'Template deleted' });
+    } catch (err) {
+      if (err?.code === '23503') {
+        // FK violation: template in use
+        return res.status(409).json({ success: false, error: 'Template is in use and cannot be deleted', code: 'TEMPLATE_IN_USE' });
+      }
+      return res.status(500).json({ success: false, error: 'Failed to delete template' });
+    }
   } catch (e) {
-    res.status(500).json({ success: false, error: 'Failed to delete template' });
+    return res.status(500).json({ success: false, error: 'Failed to delete template' });
   }
 });
 
@@ -64,10 +72,29 @@ router.delete('/templates', requireTenant, requireEntitledTenant, async (req, re
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
     if (ids.length === 0) return res.status(400).json({ success: false, error: 'ids[] required' });
-    await query('DELETE FROM templates WHERE tenant_id=$1 AND id = ANY($2::uuid[])', [req.tenantId, ids]);
-    res.json({ success: true, message: 'Templates deleted' });
+
+    const deleted = [];
+    const failed = [];
+    for (const id of ids) {
+      try {
+        /* eslint-disable no-await-in-loop */
+        await query('DELETE FROM templates WHERE tenant_id=$1 AND id=$2::uuid', [req.tenantId, id]);
+        deleted.push(id);
+      } catch (err) {
+        if (err?.code === '23503') {
+          failed.push({ id, reason: 'TEMPLATE_IN_USE' });
+        } else {
+          failed.push({ id, reason: 'UNKNOWN' });
+        }
+      }
+    }
+
+    if (failed.length > 0 && deleted.length === 0) {
+      return res.status(409).json({ success: false, error: 'Some templates are in use and cannot be deleted', deleted, failed });
+    }
+    return res.json({ success: true, message: 'Bulk delete completed', deleted, failed });
   } catch (e) {
-    res.status(500).json({ success: false, error: 'Failed to bulk delete templates' });
+    return res.status(500).json({ success: false, error: 'Failed to bulk delete templates' });
   }
 });
 
