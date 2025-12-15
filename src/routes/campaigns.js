@@ -473,6 +473,44 @@ router.get('/campaigns/:id/stats', requireTenant, requireEntitledTenant, async (
   }
 });
 
+// GET /api/campaigns/:id/click-breakdown - Get click analytics by URL
+router.get('/campaigns/:id/click-breakdown', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    
+    // Verify campaign belongs to tenant
+    const own = await query('SELECT id FROM campaigns WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [campaignId, req.tenantId]);
+    if (own.rowCount === 0) return res.status(404).json({ success: false, error: 'Campaign not found' });
+
+    // Get click events grouped by URL
+    const clicksResult = await query(`
+      SELECT 
+        payload->>'url' as url,
+        COUNT(*) as total_clicks,
+        COUNT(DISTINCT contact_id) as unique_clicks
+      FROM email_events
+      WHERE campaign_id = $1 
+        AND tenant_id = $2 
+        AND type = 'clicked'
+        AND payload ? 'url'
+      GROUP BY payload->>'url'
+      ORDER BY total_clicks DESC
+    `, [campaignId, req.tenantId]);
+
+    res.json({
+      success: true,
+      data: clicksResult.rows.map(row => ({
+        url: row.url,
+        total_clicks: parseInt(row.total_clicks) || 0,
+        unique_clicks: parseInt(row.unique_clicks) || 0
+      }))
+    });
+  } catch (e) {
+    console.error('Click breakdown error:', e);
+    res.status(500).json({ success: false, error: 'Failed to fetch click breakdown' });
+  }
+});
+
 // GET /api/campaigns/:id/analytics?days=7 — campaign-focused analytics (daily breakdown + recent activity)
 router.get('/campaigns/:id/analytics', requireTenant, requireEntitledTenant, async (req, res) => {
   try {

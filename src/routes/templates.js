@@ -47,6 +47,58 @@ router.get('/templates/:id', requireTenant, requireEntitledTenant, async (req, r
   }
 });
 
+// Update a template (PATCH)
+router.patch('/templates/:id', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const { name, subject, body_html, body_text } = req.body || {};
+    
+    // Check template exists and belongs to tenant
+    const existing = await query('SELECT id FROM templates WHERE tenant_id=$1 AND id=$2', [req.tenantId, req.params.id]);
+    if (existing.rowCount === 0) return res.status(404).json({ success: false, error: 'Not found' });
+    
+    // Build dynamic update query
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+    
+    if (name !== undefined) {
+      updates.push(`name = $${paramIndex++}`);
+      values.push(name);
+    }
+    if (subject !== undefined) {
+      updates.push(`subject = $${paramIndex++}`);
+      values.push(subject);
+    }
+    if (body_html !== undefined) {
+      updates.push(`body_html = $${paramIndex++}`);
+      values.push(body_html);
+    }
+    if (body_text !== undefined) {
+      updates.push(`body_text = $${paramIndex++}`);
+      values.push(body_text);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, error: 'No fields to update' });
+    }
+    
+    // Add updated_at
+    updates.push(`updated_at = NOW()`);
+    
+    // Add WHERE clause params
+    values.push(req.tenantId);
+    values.push(req.params.id);
+    
+    const sql = `UPDATE templates SET ${updates.join(', ')} WHERE tenant_id = $${paramIndex++} AND id = $${paramIndex} RETURNING id, name, subject, type, body_html, body_text, created_at, updated_at`;
+    
+    const r = await query(sql, values);
+    res.json({ success: true, data: r.rows[0] });
+  } catch (e) {
+    console.error('Template update error:', e);
+    res.status(500).json({ success: false, error: 'Failed to update template' });
+  }
+});
+
 // Delete a single template
 router.delete('/templates/:id', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
@@ -99,5 +151,3 @@ router.delete('/templates', requireTenant, requireEntitledTenant, async (req, re
 });
 
 export default router;
-
-

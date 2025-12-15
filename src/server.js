@@ -12,6 +12,9 @@ import trackingRouter from './routes/tracking.js';
 import provisioningRouter from './routes/provisioning.js';
 import webhooksRouter from './routes/webhooks.js';
 import suppressionsRouter from './routes/suppressions.js';
+import unsubscribeRouter from './routes/unsubscribe.js';
+import contactsRouter from './routes/contacts.js';
+import gdprRouter from './routes/gdpr.js';
 import recipientsRouter from './routes/recipients.js';
 import analyticsRouter from './routes/analytics.js';
 
@@ -56,8 +59,11 @@ app.use('/api', recipientsRouter);
 app.use('/api', analyticsRouter);
 app.use('/api', provisioningRouter);
 app.use('/api/suppressions', suppressionsRouter);
+app.use('/api', unsubscribeRouter);
+app.use('/api', contactsRouter);
+app.use('/api', gdprRouter);
 app.use('/', webhooksRouter);
-app.use('/', trackingRouter);
+app.use('/api/tracking', trackingRouter);
 
 // 404 handler for unmatched routes
 app.use((req, res) => {

@@ -361,3 +361,68 @@ router.get('/stats', requireTenant, requireEntitledTenant, async (req, res) => {
 });
 
 export default router;
+
+// Import bounces from motorical_db email_events
+router.post('/import-bounces', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const { days = 30 } = req.body;
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - days);
+    
+    const { motoricalQuery } = await import('../dbMotorical.js');
+    
+    // Query bounces from motorical_db with JOIN to get recipient_email
+    const bouncesQuery = `
+      SELECT DISTINCT ee.recipient_email
+      FROM bounce_analysis ba
+      JOIN email_events ee ON ba.email_event_id = ee.id
+      WHERE (ba.smtp_code LIKE '5%' OR ba.bounce_category = 'hard')
+        AND ba.created_at >= $1
+        AND ee.recipient_email IS NOT NULL
+    `;
+    
+    const bounces = await motoricalQuery(bouncesQuery, [sinceDate]);
+    
+    // Get customer's motorical_account_id
+    const accountResult = await query(
+      `SELECT motorical_account_id FROM tenants WHERE id = $1`,
+      [req.tenantId]
+    );
+    
+    if (accountResult.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+    
+    const motoricalAccountId = accountResult.rows[0].motorical_account_id;
+    let imported = 0;
+    let skipped = 0;
+    
+    // Add each bounced email to suppressions
+    for (const bounce of bounces.rows) {
+      try {
+        await query(`
+          INSERT INTO suppressions (tenant_id, email, reason, source, motorical_account_id)
+          VALUES ($1, $2, 'bounce', 'import', $3)
+          ON CONFLICT (tenant_id, email) DO NOTHING
+        `, [req.tenantId, bounce.recipient_email, motoricalAccountId]);
+        imported++;
+      } catch (err) {
+        skipped++;
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        total_found: bounces.rowCount,
+        imported,
+        skipped,
+        days
+      }
+    });
+  } catch (e) {
+    console.error('Import bounces error:', e);
+    res.status(500).json({ success: false, error: 'Failed to import bounces' });
+  }
+});
+

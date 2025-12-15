@@ -27,6 +27,7 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
       suppressed,      // true/false - suppression status
       campaign_id,     // participated in specific campaign
       email_domain,    // filter by email domain
+      list_id,         // filter by list membership
       date_from,       // created after this date
       date_to,         // created before this date
       search,          // search name or email
@@ -35,6 +36,22 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
       limit = 50,      // pagination
       offset = 0
     } = req.query;
+
+    // Parse comma-separated arrays from query params
+    const parseArrayParam = (param) => {
+      if (!param || param === '') return [];
+      if (Array.isArray(param)) return param;
+      if (typeof param === 'string' && param.includes(',')) {
+        return param.split(',').map(v => v.trim()).filter(v => v);
+      }
+      return param;
+    };
+
+    // Convert comma-separated filter params to arrays
+    const statusArray = parseArrayParam(status);
+    const engagementArray = parseArrayParam(engagement);
+    const campaignIdArray = parseArrayParam(campaign_id);
+    const listIdArray = parseArrayParam(list_id);
 
     const tenantId = req.tenantId;
     
@@ -77,26 +94,26 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
     let paramCount = 1;
 
     // Status filter
-    if (status) {
+    if (statusArray && (Array.isArray(statusArray) ? statusArray.length > 0 : statusArray)) {
       paramCount++;
-      if (Array.isArray(status)) {
-        conditions.push(`rs.computed_status = ANY($${paramCount})`);
-        params.push(status);
+      if (Array.isArray(statusArray) && statusArray.length > 0) {
+        conditions.push(`rs.computed_status = ANY($\${paramCount})`);
+        params.push(statusArray);
       } else {
-        conditions.push(`rs.computed_status = $${paramCount}`);
-        params.push(status);
+        conditions.push(`rs.computed_status = $\${paramCount}`);
+        params.push(statusArray);
       }
     }
 
     // Engagement level filter
-    if (engagement) {
+    if (engagementArray && (Array.isArray(engagementArray) ? engagementArray.length > 0 : engagementArray)) {
       paramCount++;
-      if (Array.isArray(engagement)) {
-        conditions.push(`rs.engagement_level = ANY($${paramCount})`);
-        params.push(engagement);
+      if (Array.isArray(engagementArray) && engagementArray.length > 0) {
+        conditions.push(`rs.engagement_level = ANY($\${paramCount})`);
+        params.push(engagementArray);
       } else {
-        conditions.push(`rs.engagement_level = $${paramCount}`);
-        params.push(engagement);
+        conditions.push(`rs.engagement_level = $\${paramCount}`);
+        params.push(engagementArray);
       }
     }
 
@@ -110,13 +127,39 @@ router.get('/recipients', requireTenant, requireEntitledTenant, async (req, res)
     }
 
     // Campaign participation filter
-    if (campaign_id) {
+    if (campaignIdArray && (Array.isArray(campaignIdArray) ? campaignIdArray.length > 0 : campaignIdArray)) {
       paramCount++;
-      conditions.push(`EXISTS (
-        SELECT 1 FROM email_events ee 
-        WHERE ee.contact_id = rs.id AND ee.campaign_id = $${paramCount}
-      )`);
-      params.push(campaign_id);
+      if (Array.isArray(campaignIdArray) && campaignIdArray.length > 0) {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM email_events ee 
+          WHERE ee.contact_id = rs.id AND ee.campaign_id = ANY($${paramCount})
+        )`);
+        params.push(campaignIdArray);
+      } else {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM email_events ee 
+          WHERE ee.contact_id = rs.id AND ee.campaign_id = $${paramCount}
+        )`);
+        params.push(campaignIdArray);
+      }
+    }
+
+    // List membership filter
+    if (listIdArray && (Array.isArray(listIdArray) ? listIdArray.length > 0 : listIdArray)) {
+      paramCount++;
+      if (Array.isArray(listIdArray) && listIdArray.length > 0) {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM list_contacts lc 
+          WHERE lc.contact_id = rs.id AND lc.list_id = ANY($${paramCount}) AND lc.status = 'active'
+        )`);
+        params.push(listIdArray);
+      } else {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM list_contacts lc 
+          WHERE lc.contact_id = rs.id AND lc.list_id = $${paramCount} AND lc.status = 'active'
+        )`);
+        params.push(listIdArray);
+      }
     }
 
     // Email domain filter

@@ -1,9 +1,12 @@
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import { query } from '../db.js';
+import { requireEntitledTenant } from '../middleware/entitlement.js';
+import pino from 'pino';
 
 const router = express.Router();
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
+// Helper to get tenant from header
 function requireTenant(req, res, next) {
   const tenantId = req.headers['x-tenant-id'];
   if (!tenantId) return res.status(400).json({ success: false, error: 'Missing X-Tenant-Id' });
@@ -11,566 +14,451 @@ function requireTenant(req, res, next) {
   next();
 }
 
-function getSettingsDefaults() {
-  return { unsubscribe_mode: 'customer', custom_unsubscribe_url: null };
-}
-
-function isHttpsUrl(url) {
+// GET /api/tracking/events - Comprehensive tracking events explorer
+router.get('/events', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const u = new URL(url);
-    return u.protocol === 'https:';
-  } catch (_) {
-    return false;
-  }
-}
+    const {
+      campaign_id,
+      contact_email,
+      event_type,      // sent, delivered, opened, clicked, bounced, unsubscribed, complained
+      date_from,
+      date_to,
+      limit = 100,
+      offset = 0,
+      sort_by = 'occurred_at',
+      sort_order = 'desc'
+    } = req.query;
 
-// GET tenant unsubscribe settings
-router.get('/api/settings/unsubscribe', requireTenant, async (req, res) => {
-  try {
-    const r = await query('SELECT unsubscribe_mode, custom_unsubscribe_url FROM tenant_settings WHERE tenant_id=$1', [req.tenantId]);
-    const data = r.rowCount > 0 ? r.rows[0] : getSettingsDefaults();
-    res.json({ success: true, data });
-  } catch (e) {
-    res.status(500).json({ success: false, error: 'Failed to load settings' });
-  }
-});
+    const tenantId = req.tenantId;
 
-// PATCH tenant unsubscribe settings
-router.patch('/api/settings/unsubscribe', requireTenant, async (req, res) => {
-  try {
-    const { unsubscribe_mode, custom_unsubscribe_url } = req.body || {};
-    if (unsubscribe_mode && !['customer', 'motorical'].includes(unsubscribe_mode)) {
-      return res.status(400).json({ success: false, error: 'unsubscribe_mode must be customer|motorical' });
-    }
-    if (custom_unsubscribe_url && !isHttpsUrl(custom_unsubscribe_url)) {
-      return res.status(400).json({ success: false, error: 'custom_unsubscribe_url must be HTTPS' });
-    }
-    const r = await query('SELECT id FROM tenant_settings WHERE tenant_id=$1', [req.tenantId]);
-    if (r.rowCount === 0) {
-      await query(
-        `INSERT INTO tenant_settings (tenant_id, unsubscribe_mode, custom_unsubscribe_url)
-         VALUES ($1, $2, $3)`,
-        [req.tenantId, unsubscribe_mode || 'customer', custom_unsubscribe_url || null]
-      );
-    } else {
-      await query(
-        `UPDATE tenant_settings SET
-           unsubscribe_mode=COALESCE($2, unsubscribe_mode),
-           custom_unsubscribe_url=COALESCE($3, custom_unsubscribe_url),
-           updated_at=NOW()
-         WHERE tenant_id=$1`,
-        [req.tenantId, unsubscribe_mode || null, custom_unsubscribe_url || null]
-      );
-    }
-    res.json({ success: true, message: 'Settings updated' });
-  } catch (e) {
-    res.status(500).json({ success: false, error: 'Failed to update settings' });
-  }
-});
+    // Parse array params for multi-select filters
+    const parseArrayParam = (param) => {
+      if (!param || param === '') return [];
+      if (Array.isArray(param)) return param;
+      if (typeof param === 'string' && param.includes(',')) {
+        return param.split(',').map(v => v.trim()).filter(v => v);
+      }
+      return param;
+    };
 
-// Helper used later by sender to generate tokens (exported)
-export function signUnsubscribeToken({ tenantId, campaignId, contactId, ttl = '7d' }) {
-  const secret = process.env.SERVICE_JWT_SECRET;
-  if (!secret) {
-    throw new Error('SERVICE_JWT_SECRET environment variable is required for token signing');
-  }
-  return jwt.sign({ tenantId, campaignId, contactId, t: 'unsub' }, secret, { expiresIn: ttl });
-}
+    const eventTypeArray = parseArrayParam(event_type);
+    const campaignIdArray = parseArrayParam(campaign_id);
 
-function maskEmail(email) {
-  try {
-    const [local, domain] = String(email).split('@');
-    if (!domain) return 'hidden';
-    const shown = local.slice(0, 2);
-    return `${shown}***@${domain}`;
-  } catch (_) {
-    return 'hidden';
-  }
-}
+    // Build WHERE conditions
+    const conditions = ['ee.tenant_id = $1'];
+    const params = [tenantId];
+    let paramCount = 1;
 
-async function recordUnsubscribe({ tenantId, campaignId, contactId, landingVariant }) {
-  // Lookup email and motorical_account_id from contact and tenant
-  const cr = await query(
-    `SELECT c.email, t.motorical_account_id 
-     FROM contacts c 
-     JOIN tenants t ON t.id = c.tenant_id 
-     WHERE c.id=$1 AND c.tenant_id=$2`, 
-    [contactId, tenantId]
-  );
-  if (cr.rowCount === 0) return null;
-  const { email, motorical_account_id } = cr.rows[0];
-  
-  // Insert customer-scoped suppression
-  await query(
-    `INSERT INTO suppressions (motorical_account_id, tenant_id, email, reason, source, landing_variant)
-     VALUES ($1,$2,$3,'unsubscribe','link',$4)
-     ON CONFLICT (motorical_account_id, email) DO NOTHING`,
-    [motorical_account_id, tenantId, email, landingVariant]
-  );
-  
-  // Update contact status
-  await query(`UPDATE contacts SET status='unsubscribed', updated_at=NOW() WHERE id=$1 AND tenant_id=$2`, [contactId, tenantId]);
-  
-  // Record event
-  await query(
-    `INSERT INTO email_events (tenant_id, campaign_id, contact_id, type, payload)
-     VALUES ($1,$2,$3,'complained', $4)`,
-    [tenantId, campaignId, contactId, JSON.stringify({ reason: 'unsubscribe' })]
-  );
-  
-  return { email };
-}
-
-async function getTenantSettings(tenantId) {
-  const r = await query('SELECT unsubscribe_mode, custom_unsubscribe_url FROM tenant_settings WHERE tenant_id=$1', [tenantId]);
-  return r.rowCount > 0 ? r.rows[0] : getSettingsDefaults();
-}
-
-// GET/POST /t/u/:token — idempotent unsubscribe then redirect/render
-async function handleUnsub(req, res) {
-  try {
-    const { token } = req.params;
-    const secret = process.env.SERVICE_JWT_SECRET;
-    if (!secret) {
-      res.status(500).send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Configuration Error</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      color: #333;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      max-width: 500px;
-      width: 100%;
-      padding: 40px;
-      text-align: center;
-    }
-    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #ef4444; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
-    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
-    p { color: #6b7280; font-size: 16px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="icon">⚠</div>
-    <h1>Configuration Error</h1>
-    <p>Server configuration error: JWT secret not configured.</p>
-  </div>
-</body>
-</html>`);
-      return;
-    }
-    let decoded;
-    try {
-      decoded = jwt.verify(token, secret);
-    } catch (err) {
-      res.status(400).send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Invalid Link</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      color: #333;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      max-width: 500px;
-      width: 100%;
-      padding: 40px;
-      text-align: center;
-    }
-    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
-    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
-    p { color: #6b7280; font-size: 16px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="icon">⚠</div>
-    <h1>Invalid or Expired Link</h1>
-    <p>This unsubscribe link is invalid or has expired. Please contact the sender directly if you wish to unsubscribe.</p>
-  </div>
-</body>
-</html>`);
-      return;
-    }
-    if (decoded.t !== 'unsub') {
-      res.status(400).send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Invalid Token</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      color: #333;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      max-width: 500px;
-      width: 100%;
-      padding: 40px;
-      text-align: center;
-    }
-    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
-    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
-    p { color: #6b7280; font-size: 16px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="icon">⚠</div>
-    <h1>Invalid Unsubscribe Token</h1>
-    <p>This unsubscribe link is not valid. Please contact the sender directly if you wish to unsubscribe.</p>
-  </div>
-</body>
-</html>`);
-      return;
-    }
-    const tenantId = decoded.tenantId;
-    const campaignId = decoded.campaignId;
-    const contactId = decoded.contactId;
-
-    const settings = await getTenantSettings(tenantId);
-    const variant = settings.unsubscribe_mode === 'customer' ? 'customer' : 'motorical';
-
-    const info = await recordUnsubscribe({ tenantId, campaignId, contactId, landingVariant: variant });
-    const masked = maskEmail(info?.email || '');
-
-    if (variant === 'customer' && settings.custom_unsubscribe_url && isHttpsUrl(settings.custom_unsubscribe_url)) {
-      const url = new URL(settings.custom_unsubscribe_url);
-      url.searchParams.set('status', 'unsubscribed');
-      url.searchParams.set('email', masked);
-      url.searchParams.set('campaign', String(campaignId));
-      res.redirect(302, url.toString());
-      return;
+    // Event type filter
+    if (eventTypeArray && (Array.isArray(eventTypeArray) ? eventTypeArray.length > 0 : eventTypeArray)) {
+      paramCount++;
+      if (Array.isArray(eventTypeArray) && eventTypeArray.length > 0) {
+        conditions.push(`ee.type = ANY($${paramCount})`);
+        params.push(eventTypeArray);
+      } else {
+        conditions.push(`ee.type = $${paramCount}`);
+        params.push(eventTypeArray);
+      }
     }
 
-    // Motorical-hosted confirmation
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Unsubscribed Successfully</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
+    // Campaign filter
+    if (campaignIdArray && (Array.isArray(campaignIdArray) ? campaignIdArray.length > 0 : campaignIdArray)) {
+      paramCount++;
+      if (Array.isArray(campaignIdArray) && campaignIdArray.length > 0) {
+        conditions.push(`ee.campaign_id = ANY($${paramCount})`);
+        params.push(campaignIdArray);
+      } else {
+        conditions.push(`ee.campaign_id = $${paramCount}`);
+        params.push(campaignIdArray);
+      }
     }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      line-height: 1.6;
-      color: #333;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      max-width: 500px;
-      width: 100%;
-      padding: 40px;
-      text-align: center;
-    }
-    .icon {
-      width: 64px;
-      height: 64px;
-      margin: 0 auto 24px;
-      background: #10b981;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 32px;
-    }
-    h1 {
-      font-size: 28px;
-      font-weight: 600;
-      color: #1f2937;
-      margin-bottom: 16px;
-    }
-    .message {
-      color: #6b7280;
-      font-size: 16px;
-      margin-bottom: 24px;
-    }
-    .info-box {
-      background: #f9fafb;
-      border-radius: 8px;
-      padding: 16px;
-      margin-top: 24px;
-      text-align: left;
-    }
-    .info-item {
-      display: flex;
-      justify-content: space-between;
-      padding: 8px 0;
-      border-bottom: 1px solid #e5e7eb;
-    }
-    .info-item:last-child {
-      border-bottom: none;
-    }
-    .info-label {
-      font-weight: 500;
-      color: #6b7280;
-      font-size: 14px;
-    }
-    .info-value {
-      color: #1f2937;
-      font-size: 14px;
-      font-weight: 500;
-    }
-    .status-badge {
-      display: inline-block;
-      background: #d1fae5;
-      color: #065f46;
-      padding: 4px 12px;
-      border-radius: 12px;
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .footer {
-      margin-top: 32px;
-      padding-top: 24px;
-      border-top: 1px solid #e5e7eb;
-      color: #9ca3af;
-      font-size: 13px;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="icon">✓</div>
-    <h1>You've been unsubscribed</h1>
-    <p class="message">You will no longer receive emails from this sender.</p>
-    ${masked ? `
-    <div class="info-box">
-      <div class="info-item">
-        <span class="info-label">Email Address</span>
-        <span class="info-value">${masked}</span>
-      </div>
-      <div class="info-item">
-        <span class="info-label">Status</span>
-        <span class="status-badge">Unsubscribed</span>
-      </div>
-    </div>
-    ` : `
-    <div class="info-box">
-      <div class="info-item">
-        <span class="info-label">Status</span>
-        <span class="status-badge">Unsubscribed</span>
-      </div>
-    </div>
-    `}
-    <div class="footer">
-      <p>This change takes effect immediately. If you have any questions, please contact the sender directly.</p>
-    </div>
-  </div>
-</body>
-</html>`);
-  } catch (e) {
-    res.status(500).send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Error</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      color: #333;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      max-width: 500px;
-      width: 100%;
-      padding: 40px;
-      text-align: center;
-    }
-    .icon { width: 64px; height: 64px; margin: 0 auto 24px; background: #ef4444; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; color: white; }
-    h1 { font-size: 24px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
-    p { color: #6b7280; font-size: 16px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="icon">✕</div>
-    <h1>Unsubscribe Failed</h1>
-    <p>We encountered an error processing your unsubscribe request. Please try again later or contact the sender directly.</p>
-  </div>
-</body>
-</html>`);
-  }
-}
 
-router.get('/t/u/:token', handleUnsub);
-router.post('/t/u/:token', handleUnsub);
+    // Contact email filter
+    if (contact_email) {
+      paramCount++;
+      conditions.push(`c.email ILIKE '%' || $${paramCount} || '%'`);
+      params.push(contact_email);
+    }
 
-// Helper used by sender to generate click tracking tokens
-export function signClickToken({ tenantId, campaignId, contactId, originalUrl, linkIndex, ttl = '90d' }) {
-  const secret = process.env.SERVICE_JWT_SECRET;
-  return jwt.sign({ 
-    tenantId, 
-    campaignId, 
-    contactId, 
-    originalUrl, 
-    linkIndex,
-    t: 'click' 
-  }, secret, { expiresIn: ttl });
-}
+    // Date range filters
+    if (date_from) {
+      paramCount++;
+      conditions.push(`ee.occurred_at >= $${paramCount}`);
+      params.push(date_from);
+    }
 
-async function recordClick({ tenantId, campaignId, contactId, originalUrl, linkIndex, userAgent, ip }) {
-  try {
-    // Record click event in email_events
-    await query(
-      `INSERT INTO email_events (tenant_id, campaign_id, contact_id, type, payload, occurred_at)
-       VALUES ($1, $2, $3, 'clicked', $4, NOW())`,
-      [tenantId, campaignId, contactId, JSON.stringify({ 
-        originalUrl, 
-        linkIndex, 
-        userAgent: userAgent?.substring(0, 500), // Limit length
-        ip: ip?.substring(0, 45) // IPv6 max length
-      })]
-    );
+    if (date_to) {
+      paramCount++;
+      conditions.push(`ee.occurred_at <= $${paramCount}`);
+      params.push(date_to);
+    }
 
-    // Update contact last engagement
-    await query(
-      `UPDATE contacts SET last_engagement_at = NOW(), updated_at = NOW() 
-       WHERE id = $1 AND tenant_id = $2`,
-      [contactId, tenantId]
-    );
+    const whereClause = conditions.join(' AND ');
 
-    console.log(`Click recorded: campaign=${campaignId}, contact=${contactId}, url=${originalUrl}`);
-    return true;
+    // Sortable columns
+    const validSortColumns = {
+      'occurred_at': 'ee.occurred_at',
+      'type': 'ee.type',
+      'contact_email': 'c.email',
+      'campaign_name': 'cam.name'
+    };
+
+    const sortColumn = validSortColumns[sort_by] || validSortColumns['occurred_at'];
+    const sortDirection = ['asc', 'desc'].includes(sort_order?.toLowerCase()) ? sort_order.toUpperCase() : 'DESC';
+
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM email_events ee
+      LEFT JOIN contacts c ON ee.contact_id = c.id
+      WHERE ${whereClause}
+    `;
+    const countResult = await query(countQuery, params);
+    const total = parseInt(countResult.rows[0]?.total || 0);
+
+    // Get events with pagination
+    paramCount++;
+    const limitParam = paramCount;
+    params.push(parseInt(limit));
+    
+    paramCount++;
+    const offsetParam = paramCount;
+    params.push(parseInt(offset));
+
+    const eventsQuery = `
+      SELECT 
+        ee.id,
+        ee.type,
+        ee.occurred_at,
+        ee.payload,
+        c.email as contact_email,
+        c.name as contact_name,
+        cam.name as campaign_name,
+        cam.id as campaign_id
+      FROM email_events ee
+      LEFT JOIN contacts c ON ee.contact_id = c.id
+      LEFT JOIN campaigns cam ON ee.campaign_id = cam.id
+      WHERE ${whereClause}
+      ORDER BY ${sortColumn} ${sortDirection}
+      LIMIT $${limitParam} OFFSET $${offsetParam}
+    `;
+
+    const eventsResult = await query(eventsQuery, params);
+
+    res.json({
+      success: true,
+      data: {
+        events: eventsResult.rows,
+        pagination: {
+          total,
+          limit: parseInt(limit),
+          offset: parseInt(offset),
+          pages: Math.ceil(total / parseInt(limit))
+        }
+      }
+    });
   } catch (error) {
-    console.error('Failed to record click:', error);
-    return false;
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to fetch tracking events');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve tracking events' 
+    });
   }
-}
+});
 
-// GET/POST /c/:token — click tracking redirect
-async function handleClick(req, res) {
+// GET /api/tracking/export - Export tracking events as CSV
+router.get('/export', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const { token } = req.params;
-    const { url } = req.query;
-    const secret = process.env.SERVICE_JWT_SECRET;
-    
-    let decoded;
-    try {
-      decoded = jwt.verify(token, secret);
-    } catch (err) {
-      console.warn('Invalid click token:', err.message);
-      // Still redirect to the URL if provided for user experience
-      if (url) {
-        return res.redirect(302, decodeURIComponent(url));
+    const {
+      campaign_id,
+      contact_email,
+      event_type,
+      date_from,
+      date_to
+    } = req.query;
+
+    const tenantId = req.tenantId;
+
+    // Parse array params
+    const parseArrayParam = (param) => {
+      if (!param || param === '') return [];
+      if (Array.isArray(param)) return param;
+      if (typeof param === 'string' && param.includes(',')) {
+        return param.split(',').map(v => v.trim()).filter(v => v);
       }
-      return res.status(400).send('<html><body>Invalid tracking link.</body></html>');
-    }
+      return param;
+    };
 
-    if (decoded.t !== 'click') {
-      console.warn('Invalid click token type:', decoded.t);
-      if (url || decoded.originalUrl) {
-        return res.redirect(302, decodeURIComponent(url || decoded.originalUrl));
+    const eventTypeArray = parseArrayParam(event_type);
+    const campaignIdArray = parseArrayParam(campaign_id);
+
+    // Build WHERE conditions (same as events endpoint)
+    const conditions = ['ee.tenant_id = $1'];
+    const params = [tenantId];
+    let paramCount = 1;
+
+    if (eventTypeArray && (Array.isArray(eventTypeArray) ? eventTypeArray.length > 0 : eventTypeArray)) {
+      paramCount++;
+      if (Array.isArray(eventTypeArray) && eventTypeArray.length > 0) {
+        conditions.push(`ee.type = ANY($${paramCount})`);
+        params.push(eventTypeArray);
+      } else {
+        conditions.push(`ee.type = $${paramCount}`);
+        params.push(eventTypeArray);
       }
-      return res.status(400).send('<html><body>Invalid tracking link.</body></html>');
     }
 
-    const { tenantId, campaignId, contactId, originalUrl, linkIndex } = decoded;
-    const targetUrl = url ? decodeURIComponent(url) : originalUrl;
-
-    if (!targetUrl) {
-      return res.status(400).send('<html><body>Missing destination URL.</body></html>');
+    if (campaignIdArray && (Array.isArray(campaignIdArray) ? campaignIdArray.length > 0 : campaignIdArray)) {
+      paramCount++;
+      if (Array.isArray(campaignIdArray) && campaignIdArray.length > 0) {
+        conditions.push(`ee.campaign_id = ANY($${paramCount})`);
+        params.push(campaignIdArray);
+      } else {
+        conditions.push(`ee.campaign_id = $${paramCount}`);
+        params.push(campaignIdArray);
+      }
     }
 
-    // Record the click (async, don't block redirect)
-    const userAgent = req.headers['user-agent'];
-    const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'];
+    if (contact_email) {
+      paramCount++;
+      conditions.push(`c.email ILIKE '%' || $${paramCount} || '%'`);
+      params.push(contact_email);
+    }
+
+    if (date_from) {
+      paramCount++;
+      conditions.push(`ee.occurred_at >= $${paramCount}`);
+      params.push(date_from);
+    }
+
+    if (date_to) {
+      paramCount++;
+      conditions.push(`ee.occurred_at <= $${paramCount}`);
+      params.push(date_to);
+    }
+
+    const whereClause = conditions.join(' AND ');
+
+    // Fetch all events (no pagination for export)
+    const exportQuery = `
+      SELECT 
+        ee.type as event_type,
+        ee.occurred_at,
+        c.email as contact_email,
+        c.name as contact_name,
+        cam.name as campaign_name,
+        ee.payload->>'url' as clicked_url,
+        ee.payload->>'reason' as bounce_reason,
+        ee.payload->>'smtp_code' as smtp_code
+      FROM email_events ee
+      LEFT JOIN contacts c ON ee.contact_id = c.id
+      LEFT JOIN campaigns cam ON ee.campaign_id = cam.id
+      WHERE ${whereClause}
+      ORDER BY ee.occurred_at DESC
+      LIMIT 10000
+    `;
+
+    const result = await query(exportQuery, params);
+
+    // Generate CSV
+    const csvRows = [];
     
-    recordClick({ 
-      tenantId, 
-      campaignId, 
-      contactId, 
-      originalUrl: targetUrl, 
-      linkIndex, 
-      userAgent, 
-      ip 
-    }).catch(error => {
-      console.error('Click recording failed:', error);
+    // CSV Header
+    csvRows.push('Event Type,Occurred At,Contact Email,Contact Name,Campaign Name,Clicked URL,Bounce Reason,SMTP Code');
+
+    // CSV Data
+    result.rows.forEach(row => {
+      const csvRow = [
+        row.event_type || '',
+        row.occurred_at ? new Date(row.occurred_at).toISOString() : '',
+        row.contact_email || '',
+        row.contact_name || '',
+        row.campaign_name || '',
+        row.clicked_url || '',
+        row.bounce_reason || '',
+        row.smtp_code || ''
+      ].map(field => {
+        // Escape quotes and wrap in quotes if contains comma, quote, or newline
+        const stringField = String(field);
+        if (stringField.includes(',') || stringField.includes('"') || stringField.includes('\n')) {
+          return `"${stringField.replace(/"/g, '""')}"`;
+        }
+        return stringField;
+      });
+      
+      csvRows.push(csvRow.join(','));
     });
 
-    // Immediate redirect for good user experience
-    res.redirect(302, targetUrl);
-
+    const csv = csvRows.join('\n');
+    const timestamp = new Date().toISOString().split('T')[0];
+    
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="tracking-events-${timestamp}.csv"`);
+    res.send('\uFEFF' + csv); // UTF-8 BOM for Excel compatibility
   } catch (error) {
-    console.error('Click handling error:', error);
-    const { url } = req.query;
-    if (url) {
-      return res.redirect(302, decodeURIComponent(url));
-    }
-    res.status(500).send('<html><body>Tracking failed. Please try again later.</body></html>');
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to export tracking events');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to export tracking events' 
+    });
   }
-}
+});
 
-router.get('/c/:token', handleClick);
-router.post('/c/:token', handleClick);
+// GET /api/tracking/stats - Tracking statistics summary with filter support
+router.get('/stats', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const {
+      campaign_id,
+      contact_email,
+      event_type,
+      date_from,
+      date_to,
+      days = 30
+    } = req.query;
+    
+    const tenantId = req.tenantId;
 
-router.get('/t/u/:token', handleUnsub);
+    // Parse array params
+    const parseArrayParam = (param) => {
+      if (!param || param === '') return [];
+      if (Array.isArray(param)) return param;
+      if (typeof param === 'string' && param.includes(',')) {
+        return param.split(',').map(v => v.trim()).filter(v => v);
+      }
+      return param;
+    };
+
+    const eventTypeArray = parseArrayParam(event_type);
+    const campaignIdArray = parseArrayParam(campaign_id);
+
+    // Build WHERE conditions
+    const conditions = ['ee.tenant_id = $1'];
+    const params = [tenantId];
+    let paramCount = 1;
+
+    // Event type filter
+    if (eventTypeArray && (Array.isArray(eventTypeArray) ? eventTypeArray.length > 0 : eventTypeArray)) {
+      paramCount++;
+      if (Array.isArray(eventTypeArray) && eventTypeArray.length > 0) {
+        conditions.push(`ee.type = ANY($${paramCount})`);
+        params.push(eventTypeArray);
+      } else {
+        conditions.push(`ee.type = $${paramCount}`);
+        params.push(eventTypeArray);
+      }
+    }
+
+    // Campaign filter
+    if (campaignIdArray && (Array.isArray(campaignIdArray) ? campaignIdArray.length > 0 : campaignIdArray)) {
+      paramCount++;
+      if (Array.isArray(campaignIdArray) && campaignIdArray.length > 0) {
+        conditions.push(`ee.campaign_id = ANY($${paramCount})`);
+        params.push(campaignIdArray);
+      } else {
+        conditions.push(`ee.campaign_id = $${paramCount}`);
+        params.push(campaignIdArray);
+      }
+    }
+
+    // Contact email filter
+    if (contact_email) {
+      paramCount++;
+      conditions.push(`EXISTS (
+        SELECT 1 FROM contacts c 
+        WHERE c.id = ee.contact_id AND c.email ILIKE '%' || $${paramCount} || '%'
+      )`);
+      params.push(contact_email);
+    }
+
+    // Date range filters
+    if (date_from) {
+      paramCount++;
+      conditions.push(`ee.occurred_at >= $${paramCount}`);
+      params.push(date_from);
+    } else {
+      // Default to days parameter if no date_from
+      paramCount++;
+      conditions.push(`ee.occurred_at >= NOW() - INTERVAL '1 day' * $${paramCount}`);
+      params.push(parseInt(days));
+    }
+
+    if (date_to) {
+      paramCount++;
+      conditions.push(`ee.occurred_at <= $${paramCount}`);
+      params.push(date_to);
+    }
+
+    const whereClause = conditions.join(' AND ');
+
+    const statsQuery = `
+      SELECT 
+        type,
+        COUNT(*) as count
+      FROM email_events ee
+      WHERE ${whereClause}
+      GROUP BY type
+      ORDER BY count DESC
+    `;
+
+    const result = await query(statsQuery, params);
+
+    const stats = {
+      total: result.rows.reduce((sum, row) => sum + parseInt(row.count), 0),
+      by_type: result.rows.reduce((acc, row) => {
+        acc[row.type] = parseInt(row.count);
+        return acc;
+      }, {})
+    };
+
+    res.json({
+      success: true,
+      data: stats
+    });
+  } catch (error) {
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to fetch tracking stats');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve tracking statistics' 
+    });
+  }
+});
+router.get('/stats', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const tenantId = req.tenantId;
+
+    const statsQuery = `
+      SELECT 
+        type,
+        COUNT(*) as count
+      FROM email_events
+      WHERE tenant_id = $1 
+        AND occurred_at >= NOW() - INTERVAL '${parseInt(days)} days'
+      GROUP BY type
+      ORDER BY count DESC
+    `;
+
+    const result = await query(statsQuery, [tenantId]);
+
+    const stats = {
+      total: result.rows.reduce((sum, row) => sum + parseInt(row.count), 0),
+      by_type: result.rows.reduce((acc, row) => {
+        acc[row.type] = parseInt(row.count);
+        return acc;
+      }, {})
+    };
+
+    res.json({
+      success: true,
+      data: stats
+    });
+  } catch (error) {
+    logger.error({ error, tenantId: req.tenantId }, 'Failed to fetch tracking stats');
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve tracking statistics' 
+    });
+  }
+});
 
 export default router;
-
-

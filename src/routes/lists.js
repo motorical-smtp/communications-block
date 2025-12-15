@@ -1,8 +1,13 @@
 import express from 'express';
 import { query } from '../db.js';
 import { requireEntitledTenant } from '../middleware/entitlement.js';
+import { csvUploadRateLimiter } from '../middleware/csvRateLimiter.js';
+import { validateCsvData } from '../utils/csvInjectionValidator.js';
 import multer from 'multer';
 import { parse } from 'csv-parse/sync';
+import pino from 'pino';
+
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 const router = express.Router();
 
@@ -239,14 +244,65 @@ router.post('/contacts/upsert', requireTenant, requireEntitledTenant, async (req
 
 router.post('/lists/:id/contacts', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const { emails } = req.body || {};
+    const { emails, contact_ids } = req.body || {};
+    const listId = req.params.id;
+    const tenantId = req.tenantId;
+    
+    // Verify list belongs to tenant
+    const listCheck = await query('SELECT id FROM lists WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL', [listId, tenantId]);
+    if (listCheck.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'List not found' });
+    }
+    
+    const added = [];
+    
+    // Support adding by contact IDs (from MegaList selections)
+    if (Array.isArray(contact_ids) && contact_ids.length > 0) {
+      // Verify all contacts belong to tenant and add them to list
+      const validContactsResult = await query(
+        'SELECT id FROM contacts WHERE id = ANY($1::uuid[]) AND tenant_id = $2 AND deleted_at IS NULL',
+        [contact_ids, tenantId]
+      );
+      
+      const validIds = validContactsResult.rows.map(r => r.id);
+      
+      if (validIds.length > 0) {
+        // Batch insert into list_contacts
+        const insertValues = validIds.map((_, index) => 
+          `($1, $${index + 2}, 'active', NOW())`
+        ).join(', ');
+        
+        const insertQuery = `
+          INSERT INTO list_contacts (list_id, contact_id, status, created_at) 
+          VALUES ${insertValues}
+          ON CONFLICT (list_id, contact_id) DO NOTHING
+          RETURNING contact_id
+        `;
+        
+        const insertParams = [listId, ...validIds];
+        const insertResult = await query(insertQuery, insertParams);
+        
+        added.push(...insertResult.rows.map(r => ({ id: r.contact_id })));
+      }
+      
+      return res.json({ 
+        success: true, 
+        data: { 
+          addedCount: added.length,
+          requestedCount: contact_ids.length,
+          validCount: validIds.length
+        } 
+      });
+    }
+    
+    // Original logic for adding by emails
     if (!Array.isArray(emails) || emails.length === 0) {
-      return res.status(400).json({ success: false, error: 'emails[] required' });
+      return res.status(400).json({ success: false, error: 'emails[] or contact_ids[] required' });
     }
 
-    const added = [];
     for (const e of emails) {
-      const { email, name, phone, identity_type, identity_name } = e;
+      const emailData = typeof e === 'string' ? { email: e } : e;
+      const { email, name, phone, identity_type, identity_name } = emailData;
       if (!email) continue;
       const cr = await query(
         `INSERT INTO contacts (tenant_id, email, name, phone, identity_type, identity_name)
@@ -258,19 +314,20 @@ router.post('/lists/:id/contacts', requireTenant, requireEntitledTenant, async (
            identity_name=COALESCE(EXCLUDED.identity_name, contacts.identity_name),
            updated_at=NOW()
          RETURNING id, email`,
-        [req.tenantId, email, name || null, phone || null, identity_type || null, identity_name || null]
+        [tenantId, email, name || null, phone || null, identity_type || null, identity_name || null]
       );
       const contactId = cr.rows[0].id;
       await query(
         `INSERT INTO list_contacts (list_id, contact_id)
          VALUES ($1, $2) ON CONFLICT (list_id, contact_id) DO NOTHING`,
-        [req.params.id, contactId]
+        [listId, contactId]
       );
       added.push({ id: contactId, email: cr.rows[0].email });
     }
 
     res.json({ success: true, data: { addedCount: added.length } });
   } catch (e) {
+    logger.error({ err: e }, 'Failed to add contacts to list');
     res.status(500).json({ success: false, error: 'Failed to add contacts to list' });
   }
 });
@@ -343,57 +400,299 @@ router.put('/contacts/:id/resubscribe', requireTenant, requireEntitledTenant, as
 export default router;
 
 // CSV Import — emails with optional fields: email,name,phone,identity_type,identity_name
-const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } });
+// File size limit: 10MB (increased from 5MB)
+const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
-router.post('/lists/:id/contacts/import', requireTenant, requireEntitledTenant, upload.single('file'), async (req, res) => {
+/**
+ * Audit logging helper
+ */
+async function logAuditEvent(tenantId, eventType, action, resourceType, resourceId, userIdentifier, details) {
   try {
+    await query(
+      `INSERT INTO audit_logs (tenant_id, event_type, action, resource_type, resource_id, user_identifier, details)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [tenantId, eventType, action, resourceType, resourceId, userIdentifier, JSON.stringify(details)]
+    );
+  } catch (err) {
+    logger.error({ err, tenantId, eventType }, 'Failed to write audit log');
+  }
+}
+
+router.post('/lists/:id/contacts/import', 
+  requireTenant, 
+  requireEntitledTenant, 
+  csvUploadRateLimiter, 
+  upload.single('file'), 
+  async (req, res) => {
+    const listId = req.params.id;
+    const tenantId = req.tenantId;
+    const userIdentifier = req.ip || req.headers['x-forwarded-for'] || 'unknown';
     const dryRun = String(req.query.dryRun || req.body?.dryRun || 'false').toLowerCase() === 'true';
-    if (!req.file || !req.file.buffer) return res.status(400).json({ success: false, error: 'CSV file required (multipart form field "file")' });
-    const csvText = req.file.buffer.toString('utf8');
-    const rows = parse(csvText, { columns: true, skip_empty_lines: true, trim: true });
-    let processed = 0; let added = 0; let upserts = 0; let errors = 0;
-    const errorSamples = [];
-
-    for (const row of rows) {
-      processed += 1;
-      const email = String(row.email || '').trim().toLowerCase();
-      if (!email) { errors += 1; if (errorSamples.length < 3) errorSamples.push({ row, error: 'missing email' }); continue; }
-      const name = row.name || null;
-      const phone = row.phone || null;
-      const identity_type = row.identity_type || null;
-      const identity_name = row.identity_name || null;
-      if (dryRun) continue;
-      try {
-        const cr = await query(
-          `INSERT INTO contacts (tenant_id, email, name, phone, identity_type, identity_name)
-           VALUES ($1,$2,$3,$4,$5,$6)
-           ON CONFLICT (tenant_id, email) DO UPDATE SET
-             name=COALESCE(EXCLUDED.name, contacts.name),
-             phone=COALESCE(EXCLUDED.phone, contacts.phone),
-             identity_type=COALESCE(EXCLUDED.identity_type, contacts.identity_type),
-             identity_name=COALESCE(EXCLUDED.identity_name, contacts.identity_name),
-             updated_at=NOW()
-           RETURNING id`,
-          [req.tenantId, email, name, phone, identity_type, identity_name]
+    
+    try {
+      // File validation
+      if (!req.file || !req.file.buffer) {
+        await logAuditEvent(
+          tenantId,
+          'csv_upload',
+          'blocked',
+          'list',
+          listId,
+          userIdentifier,
+          { reason: 'no_file_provided' }
         );
-        const contactId = cr.rows[0].id;
-        const lr = await query(
-          `INSERT INTO list_contacts (list_id, contact_id)
-           VALUES ($1,$2)
-           ON CONFLICT (list_id, contact_id) DO NOTHING
-           RETURNING id`,
-          [req.params.id, contactId]
-        );
-        if (lr.rowCount > 0) added += 1; else upserts += 1;
-      } catch (e) {
-        errors += 1; if (errorSamples.length < 3) errorSamples.push({ row, error: e.message });
+        return res.status(400).json({ 
+          success: false, 
+          error: 'CSV file required (multipart form field "file")' 
+        });
       }
-    }
 
-    return res.json({ success: true, data: { processed, added, upserts, errors, errorSamples } });
+      const fileSize = req.file.buffer.length;
+      const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2);
+
+      // Verify list belongs to tenant (authorization check)
+      const listCheck = await query(
+        'SELECT id FROM lists WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL',
+        [listId, tenantId]
+      );
+      if (listCheck.rowCount === 0) {
+        await logAuditEvent(
+          tenantId,
+          'csv_upload',
+          'blocked',
+          'list',
+          listId,
+          userIdentifier,
+          { reason: 'unauthorized_list_access' }
+        );
+        return res.status(403).json({ 
+          success: false, 
+          error: 'List not found or access denied' 
+        });
+      }
+
+      // Parse CSV
+      const csvText = req.file.buffer.toString('utf8');
+      let rows;
+      try {
+        rows = parse(csvText, { columns: true, skip_empty_lines: true, trim: true });
+      } catch (parseError) {
+        await logAuditEvent(
+          tenantId,
+          'csv_upload',
+          'blocked',
+          'list',
+          listId,
+          userIdentifier,
+          { 
+            reason: 'csv_parse_error',
+            error: parseError.message,
+            fileSize
+          }
+        );
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Invalid CSV format',
+          details: parseError.message
+        });
+      }
+
+      // Server-side CSV injection validation
+      const validation = validateCsvData(rows, 10);
+      if (!validation.safe) {
+        await logAuditEvent(
+          tenantId,
+          'csv_upload',
+          'blocked',
+          'list',
+          listId,
+          userIdentifier,
+          { 
+            reason: 'csv_injection_detected',
+            violationCount: validation.violationCount,
+            violations: validation.violations,
+            fileSize,
+            rowCount: validation.totalRows
+          }
+        );
+        return res.status(400).json({
+          success: false,
+          error: 'CSV injection detected',
+          message: `Found ${validation.violationCount} potential security threat(s) in CSV data. Please review and remove dangerous formulas or commands.`,
+          violations: validation.violations,
+          violationCount: validation.violationCount
+        });
+      }
+
+      // Process rows
+      let processed = 0; 
+      let added = 0; 
+      let upserts = 0; 
+      let errors = 0;
+      const errorSamples = [];
+
+      for (const row of rows) {
+        processed += 1;
+        const email = String(row.email || '').trim().toLowerCase();
+        if (!email) { 
+          errors += 1; 
+          if (errorSamples.length < 3) errorSamples.push({ row, error: 'missing email' }); 
+          continue; 
+        }
+        
+        // Additional validation: ensure email is valid format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+          errors += 1;
+          if (errorSamples.length < 3) errorSamples.push({ row, error: 'invalid email format' });
+          continue;
+        }
+
+        const name = row.name || null;
+        const phone = row.phone || null;
+        const identity_type = row.identity_type || null;
+        const identity_name = row.identity_name || null;
+        
+        if (dryRun) continue;
+        
+        try {
+          const cr = await query(
+            `INSERT INTO contacts (tenant_id, email, name, phone, identity_type, identity_name)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (tenant_id, email) DO UPDATE SET
+               name=COALESCE(EXCLUDED.name, contacts.name),
+               phone=COALESCE(EXCLUDED.phone, contacts.phone),
+               identity_type=COALESCE(EXCLUDED.identity_type, contacts.identity_type),
+               identity_name=COALESCE(EXCLUDED.identity_name, contacts.identity_name),
+               updated_at=NOW()
+             RETURNING id`,
+            [tenantId, email, name, phone, identity_type, identity_name]
+          );
+          const contactId = cr.rows[0].id;
+          const lr = await query(
+            `INSERT INTO list_contacts (list_id, contact_id)
+             VALUES ($1,$2)
+             ON CONFLICT (list_id, contact_id) DO NOTHING
+             RETURNING id`,
+            [listId, contactId]
+          );
+          if (lr.rowCount > 0) added += 1; else upserts += 1;
+        } catch (e) {
+          errors += 1; 
+          if (errorSamples.length < 3) errorSamples.push({ row, error: e.message });
+        }
+      }
+
+      // Audit log successful import
+      await logAuditEvent(
+        tenantId,
+        'csv_upload',
+        dryRun ? 'validated' : 'imported',
+        'list',
+        listId,
+        userIdentifier,
+        {
+          fileSize,
+          fileSizeMB,
+          rowCount: rows.length,
+          processed,
+          added,
+          upserts,
+          errors,
+          dryRun
+        }
+      );
+
+      return res.json({ 
+        success: true, 
+        data: { processed, added, upserts, errors, errorSamples } 
+      });
+    } catch (e) {
+      logger.error({ err: e, tenantId, listId }, 'CSV import failed');
+      
+      await logAuditEvent(
+        tenantId,
+        'csv_upload',
+        'failed',
+        'list',
+        listId,
+        userIdentifier,
+        { 
+          error: e.message,
+          stack: e.stack
+        }
+      );
+      
+      return res.status(500).json({ 
+        success: false, 
+        error: 'CSV import failed',
+        message: e.message
+      });
+    }
+  }
+);
+
+
+
+// Export contacts from a list as CSV
+router.get('/lists/:id/contacts/export', requireTenant, requireEntitledTenant, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verify list belongs to tenant
+    const listCheck = await query(
+      'SELECT id FROM lists WHERE id = $1 AND tenant_id = $2',
+      [id, req.tenantId]
+    );
+    
+    if (listCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'List not found' });
+    }
+    
+    // Get all contacts in list
+    const contactsQuery = `
+      SELECT 
+        c.email,
+        c.name,
+        c.phone,
+        c.identity_type,
+        c.identity_name,
+        c.consent_given_at,
+        c.created_at,
+        lc.created_at as added_at
+      FROM list_contacts lc
+      JOIN contacts c ON lc.contact_id = c.id
+      WHERE lc.list_id = $1 AND c.tenant_id = $2
+      ORDER BY c.email
+    `;
+    
+    const contacts = await query(contactsQuery, [id, req.tenantId]);
+    
+    // Generate CSV
+    const csvRows = [];
+    csvRows.push('email,name,phone,identity_type,identity_name,consent_given_at,created_at,added_to_list_at');
+    
+    contacts.rows.forEach(contact => {
+      const row = [
+        contact.email || '',
+        contact.name || '',
+        contact.phone || '',
+        contact.identity_type || '',
+        contact.identity_name || '',
+        contact.consent_given_at ? new Date(contact.consent_given_at).toISOString() : '',
+        contact.created_at ? new Date(contact.created_at).toISOString() : '',
+        contact.added_at ? new Date(contact.added_at).toISOString() : ''
+      ];
+      csvRows.push(row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(','));
+    });
+    
+    const csv = csvRows.join('\n');
+    
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="contacts-export-${id}-${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send('\ufeff' + csv); // UTF-8 BOM for Excel compatibility
   } catch (e) {
-    return res.status(500).json({ success: false, error: 'CSV import failed' });
+    console.error('Export contacts error:', e);
+    res.status(500).json({ success: false, error: 'Failed to export contacts' });
   }
 });
-
-

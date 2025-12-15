@@ -40,7 +40,7 @@ async function pollPublicLogsAndUpsert() {
   // Group campaigns by motor_block_id to avoid duplicate API calls
   const campaignsByMotorBlock = new Map();
   for (const c of cr.rows) {
-    const mbId = c.motor_block_id;
+      const mbId = c.motor_block_id;
     if (!campaignsByMotorBlock.has(mbId)) {
       campaignsByMotorBlock.set(mbId, []);
     }
@@ -114,26 +114,26 @@ async function pollPublicLogsAndUpsert() {
         
         // Process for each matching campaign
         for (const c of matchingCampaigns) {
-          const normalized = (() => {
-            const t = String(item.status || '').toLowerCase();
-            if (t.includes('deliver')) return 'delivered';
-            if (t.includes('bounce')) return 'bounced';
-            if (t.includes('complain')) return 'complained';
-            if (t.includes('fail')) return 'failed';
-            if (t.includes('send') || t.includes('accept')) return 'sent';
-            return 'sent';
-          })();
-          // Insert if not already present for this message and type
+        const normalized = (() => {
+          const t = String(item.status || '').toLowerCase();
+          if (t.includes('deliver')) return 'delivered';
+          if (t.includes('bounce')) return 'bounced';
+          if (t.includes('complain')) return 'complained';
+          if (t.includes('fail')) return 'failed';
+          if (t.includes('send') || t.includes('accept')) return 'sent';
+          return 'sent';
+        })();
+        // Insert if not already present for this message and type
           // Cast type to VARCHAR to match column type
           // Use contact_id from lookup if available
-          await query(
-            `INSERT INTO email_events (tenant_id, campaign_id, contact_id, message_id, motor_block_id, type, payload, occurred_at)
+        await query(
+          `INSERT INTO email_events (tenant_id, campaign_id, contact_id, message_id, motor_block_id, type, payload, occurred_at)
              SELECT $1,$2,$3,$4,$5,$6::varchar,$7, NOW()
-             WHERE NOT EXISTS (
+           WHERE NOT EXISTS (
                SELECT 1 FROM email_events WHERE campaign_id=$2 AND message_id=$4 AND type=$6::varchar
-             )`,
+           )`,
             [c.tenant_id, c.id, contactId || null, messageId, mbId, String(normalized), JSON.stringify(item)]
-          );
+        );
         }
       }
     } catch (err) {
