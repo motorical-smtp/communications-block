@@ -1,10 +1,54 @@
 import express from 'express';
+import jwt from 'jsonwebtoken';
 import { query } from '../db.js';
 import { requireEntitledTenant } from '../middleware/entitlement.js';
 import pino from 'pino';
 
 const router = express.Router();
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+const JWT_SECRET = process.env.SERVICE_JWT_SECRET || 'comm-block-secret-change-me';
+const COMM_PUBLIC_BASE = process.env.COMM_PUBLIC_BASE || 'http://localhost:3011';
+
+/**
+ * Sign a JWT token for click tracking
+ */
+export function signClickToken({ tenantId, campaignId, contactId, originalUrl, linkIndex, ttl = '90d' }) {
+  const payload = {
+    type: 'click',
+    tid: tenantId,
+    cid: campaignId,
+    uid: contactId,
+    url: originalUrl,
+    idx: linkIndex
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: ttl });
+}
+
+/**
+ * Sign a JWT token for unsubscribe
+ */
+export function signUnsubscribeToken({ tenantId, campaignId, contactId, ttl = '30d' }) {
+  const payload = {
+    type: 'unsubscribe',
+    tid: tenantId,
+    cid: campaignId,
+    uid: contactId
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: ttl });
+}
+
+/**
+ * Verify and decode a tracking token
+ */
+export function verifyToken(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (error) {
+    logger.warn({ error: error.message }, 'Token verification failed');
+    return null;
+  }
+}
 
 // Helper to get tenant from header
 function requireTenant(req, res, next) {
@@ -458,6 +502,254 @@ router.get('/stats', requireTenant, requireEntitledTenant, async (req, res) => {
       success: false, 
       error: 'Failed to retrieve tracking statistics' 
     });
+  }
+});
+
+// ==========================================
+// PUBLIC TRACKING ROUTES (no auth required)
+// ==========================================
+
+/**
+ * Click tracking redirect - /c/:token
+ * Redirects user to the original URL and records click event
+ */
+router.get('/c/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { url: fallbackUrl } = req.query;
+    
+    const decoded = verifyToken(token);
+    
+    if (!decoded || decoded.type !== 'click') {
+      logger.warn({ token: token.substring(0, 20) + '...' }, 'Invalid click token');
+      // Try fallback URL from query param
+      if (fallbackUrl) {
+        return res.redirect(decodeURIComponent(fallbackUrl));
+      }
+      return res.status(400).send('Invalid or expired tracking link');
+    }
+    
+    const { tid: tenantId, cid: campaignId, uid: contactId, url: originalUrl, idx: linkIndex } = decoded;
+    
+    // Record click event
+    try {
+      await query(
+        `INSERT INTO email_events (tenant_id, campaign_id, contact_id, type, payload)
+         VALUES ($1, $2, $3, 'clicked', $4)`,
+        [tenantId, campaignId, contactId, JSON.stringify({ url: originalUrl, linkIndex, clickedAt: new Date().toISOString() })]
+      );
+      logger.info({ campaignId, contactId, linkIndex }, 'Click event recorded');
+    } catch (dbError) {
+      // Don't block redirect if DB insert fails
+      logger.error({ error: dbError.message, campaignId }, 'Failed to record click event');
+    }
+    
+    // Redirect to original URL
+    const redirectUrl = originalUrl || fallbackUrl;
+    if (redirectUrl) {
+      return res.redirect(decodeURIComponent(redirectUrl));
+    }
+    
+    return res.status(400).send('No redirect URL available');
+  } catch (error) {
+    logger.error({ error: error.message }, 'Click tracking error');
+    const { url: fallbackUrl } = req.query;
+    if (fallbackUrl) {
+      return res.redirect(decodeURIComponent(fallbackUrl));
+    }
+    return res.status(500).send('Tracking error');
+  }
+});
+
+/**
+ * Unsubscribe handler - /t/u/:token
+ * Processes unsubscribe request and shows confirmation
+ */
+router.get('/t/u/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    
+    const decoded = verifyToken(token);
+    
+    if (!decoded || decoded.type !== 'unsubscribe') {
+      logger.warn({ token: token.substring(0, 20) + '...' }, 'Invalid unsubscribe token');
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html><head><title>Invalid Link</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+          <h1>Invalid or Expired Link</h1>
+          <p>This unsubscribe link is no longer valid.</p>
+        </body></html>
+      `);
+    }
+    
+    const { tid: tenantId, cid: campaignId, uid: contactId } = decoded;
+    
+    // Get contact email
+    const contactResult = await query(
+      'SELECT email FROM contacts WHERE id = $1 AND tenant_id = $2',
+      [contactId, tenantId]
+    );
+    
+    if (contactResult.rowCount === 0) {
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html><head><title>Not Found</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+          <h1>Contact Not Found</h1>
+          <p>We couldn't find your subscription information.</p>
+        </body></html>
+      `);
+    }
+    
+    const email = contactResult.rows[0].email;
+    
+    // Get tenant's motorical_account_id for suppressions
+    const tenantResult = await query(
+      'SELECT motorical_account_id FROM tenants WHERE id = $1',
+      [tenantId]
+    );
+    
+    const motoricalAccountId = tenantResult.rows[0]?.motorical_account_id;
+    
+    // Add to suppressions list (prevents future sends)
+    if (motoricalAccountId) {
+      await query(
+        `INSERT INTO suppressions (motorical_account_id, tenant_id, email, reason, source)
+         VALUES ($1, $2, $3, 'unsubscribed', 'user_request')
+         ON CONFLICT (motorical_account_id, email) DO UPDATE SET
+           reason = 'unsubscribed'`,
+        [motoricalAccountId, tenantId, email]
+      );
+    }
+    
+    // Update contact status
+    await query(
+      `UPDATE contacts SET status = 'unsubscribed' WHERE id = $1 AND tenant_id = $2`,
+      [contactId, tenantId]
+    );
+    
+    // Record in unsubscribe_events table
+    try {
+      await query(
+        `INSERT INTO unsubscribe_events (tenant_id, campaign_id, email, source)
+         VALUES ($1, $2, $3, 'link_click')`,
+        [tenantId, campaignId, email]
+      );
+    } catch (e) {
+      // Table might not exist, ignore
+      console.log('unsubscribe_events insert skipped:', e.message);
+    }
+    
+    logger.info({ tenantId, campaignId, contactId, email }, 'Unsubscribe processed');
+    
+    // Return success page
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Unsubscribed</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; padding: 0; }
+          .container { max-width: 500px; margin: 80px auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+          h1 { color: #333; margin-bottom: 16px; }
+          p { color: #666; line-height: 1.6; }
+          .email { background: #f0f0f0; padding: 8px 16px; border-radius: 6px; display: inline-block; margin: 16px 0; font-family: monospace; }
+          .checkmark { font-size: 48px; margin-bottom: 16px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="checkmark">✓</div>
+          <h1>Successfully Unsubscribed</h1>
+          <p>You have been removed from our mailing list.</p>
+          <div class="email">${email}</div>
+          <p>You will no longer receive marketing emails from us.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    logger.error({ error: error.message }, 'Unsubscribe error');
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html><head><title>Error</title></head>
+      <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+        <h1>Something Went Wrong</h1>
+        <p>We couldn't process your unsubscribe request. Please try again later.</p>
+      </body></html>
+    `);
+  }
+});
+
+/**
+ * One-click unsubscribe (RFC 8058) - POST /t/u/:token
+ * Handles List-Unsubscribe-Post header
+ */
+router.post('/t/u/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    
+    const decoded = verifyToken(token);
+    
+    if (!decoded || decoded.type !== 'unsubscribe') {
+      return res.status(400).json({ success: false, error: 'Invalid token' });
+    }
+    
+    const { tid: tenantId, cid: campaignId, uid: contactId } = decoded;
+    
+    // Get contact email
+    const contactResult = await query(
+      'SELECT email FROM contacts WHERE id = $1 AND tenant_id = $2',
+      [contactId, tenantId]
+    );
+    
+    if (contactResult.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Contact not found' });
+    }
+    
+    const email = contactResult.rows[0].email;
+    
+    // Get tenant's motorical_account_id
+    const tenantResult = await query(
+      'SELECT motorical_account_id FROM tenants WHERE id = $1',
+      [tenantId]
+    );
+    
+    const motoricalAccountId = tenantResult.rows[0]?.motorical_account_id;
+    
+    // Add to suppressions
+    if (motoricalAccountId) {
+      await query(
+        `INSERT INTO suppressions (motorical_account_id, email, reason, source)
+         VALUES ($1, $2, 'unsubscribed', 'one_click')
+         ON CONFLICT (motorical_account_id, email) DO UPDATE SET
+           reason = 'unsubscribed',
+           updated_at = NOW()`,
+        [motoricalAccountId, email]
+      );
+    }
+    
+    // Update contact status
+    await query(
+      `UPDATE contacts SET status = 'unsubscribed' WHERE id = $1 AND tenant_id = $2`,
+      [contactId, tenantId]
+    );
+    
+    // Record event
+    await query(
+      `INSERT INTO email_events (tenant_id, campaign_id, contact_id, type, payload)
+       VALUES ($1, $2, $3, 'unsubscribed', $4)`,
+      [tenantId, campaignId, contactId, JSON.stringify({ email, unsubscribedAt: new Date().toISOString(), source: 'one_click' })]
+    );
+    
+    logger.info({ tenantId, campaignId, contactId, email }, 'One-click unsubscribe processed');
+    
+    return res.status(200).json({ success: true, message: 'Unsubscribed' });
+  } catch (error) {
+    logger.error({ error: error.message }, 'One-click unsubscribe error');
+    return res.status(500).json({ success: false, error: 'Internal error' });
   }
 });
 

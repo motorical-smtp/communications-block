@@ -211,7 +211,8 @@ async function sendOne({ from, to, subject, text, html, metadata, headers, motor
     password: process.env.REDIS_PASSWORD || ''
   });
   try {
-    const domain = String(from).split('@')[1] || '';
+    // Extract domain from email, handling formats like "Name" <email@domain.com>
+    const domain = String(from).split('@')[1]?.replace(/[<>\s"]/g, '') || '';
     const queueData = {
       emailId,
       motorBlockId,

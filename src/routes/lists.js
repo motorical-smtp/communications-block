@@ -147,7 +147,12 @@ router.post('/lists/from-filter', requireTenant, requireEntitledTenant, async (r
 
 router.get('/lists', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
-    const r = await query('SELECT id, name, description, type, filter_definition, created_at FROM lists WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY type DESC, created_at DESC', [req.tenantId]);
+    const r = await query(`SELECT l.id, l.name, l.description, l.type, l.filter_definition, l.created_at,
+      COALESCE(lc.cnt, 0)::int AS contact_count
+      FROM lists l
+      LEFT JOIN (SELECT list_id, COUNT(*) AS cnt FROM list_contacts GROUP BY list_id) lc ON lc.list_id = l.id
+      WHERE l.tenant_id=$1 AND l.deleted_at IS NULL
+      ORDER BY l.type DESC, l.created_at DESC`, [req.tenantId]);
     res.json({ success: true, data: r.rows });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Failed to fetch lists' });
@@ -524,13 +529,16 @@ router.post('/lists/:id/contacts/import',
         });
       }
 
-      // Process rows
+      // Process rows - validate first, then batch insert
       let processed = 0; 
       let added = 0; 
       let upserts = 0; 
       let errors = 0;
       const errorSamples = [];
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+      // Phase 1: Validate all rows
+      const validRows = [];
       for (const row of rows) {
         processed += 1;
         const email = String(row.email || '').trim().toLowerCase();
@@ -539,47 +547,98 @@ router.post('/lists/:id/contacts/import',
           if (errorSamples.length < 3) errorSamples.push({ row, error: 'missing email' }); 
           continue; 
         }
-        
-        // Additional validation: ensure email is valid format
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
           errors += 1;
           if (errorSamples.length < 3) errorSamples.push({ row, error: 'invalid email format' });
           continue;
         }
+        validRows.push({
+          email,
+          name: row.name || null,
+          phone: row.phone || null,
+          identity_type: row.identity_type || null,
+          identity_name: row.identity_name || null,
+        });
+      }
 
-        const name = row.name || null;
-        const phone = row.phone || null;
-        const identity_type = row.identity_type || null;
-        const identity_name = row.identity_name || null;
-        
-        if (dryRun) continue;
-        
-        try {
-          const cr = await query(
-            `INSERT INTO contacts (tenant_id, email, name, phone, identity_type, identity_name)
-             VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (tenant_id, email) DO UPDATE SET
-               name=COALESCE(EXCLUDED.name, contacts.name),
-               phone=COALESCE(EXCLUDED.phone, contacts.phone),
-               identity_type=COALESCE(EXCLUDED.identity_type, contacts.identity_type),
-               identity_name=COALESCE(EXCLUDED.identity_name, contacts.identity_name),
-               updated_at=NOW()
-             RETURNING id`,
-            [tenantId, email, name, phone, identity_type, identity_name]
-          );
-          const contactId = cr.rows[0].id;
-          const lr = await query(
-            `INSERT INTO list_contacts (list_id, contact_id)
-             VALUES ($1,$2)
-             ON CONFLICT (list_id, contact_id) DO NOTHING
-             RETURNING id`,
-            [listId, contactId]
-          );
-          if (lr.rowCount > 0) added += 1; else upserts += 1;
-        } catch (e) {
-          errors += 1; 
-          if (errorSamples.length < 3) errorSamples.push({ row, error: e.message });
+      // Phase 2: Batch insert (skip if dryRun)
+      if (!dryRun && validRows.length > 0) {
+        const BATCH_SIZE = 200;
+        for (let i = 0; i < validRows.length; i += BATCH_SIZE) {
+          const batch = validRows.slice(i, i + BATCH_SIZE);
+          try {
+            // Build multi-value INSERT for contacts
+            const contactPlaceholders = [];
+            const contactParams = [];
+            let pIdx = 1;
+            for (const r of batch) {
+              contactPlaceholders.push(`($${pIdx},$${pIdx+1},$${pIdx+2},$${pIdx+3},$${pIdx+4},$${pIdx+5})`);
+              contactParams.push(tenantId, r.email, r.name, r.phone, r.identity_type, r.identity_name);
+              pIdx += 6;
+            }
+            const contactResult = await query(
+              `INSERT INTO contacts (tenant_id, email, name, phone, identity_type, identity_name)
+               VALUES ${contactPlaceholders.join(',')}
+               ON CONFLICT (tenant_id, email) DO UPDATE SET
+                 name=COALESCE(EXCLUDED.name, contacts.name),
+                 phone=COALESCE(EXCLUDED.phone, contacts.phone),
+                 identity_type=COALESCE(EXCLUDED.identity_type, contacts.identity_type),
+                 identity_name=COALESCE(EXCLUDED.identity_name, contacts.identity_name),
+                 updated_at=NOW()
+               RETURNING id`,
+              contactParams
+            );
+
+            // Build multi-value INSERT for list_contacts
+            const listPlaceholders = [];
+            const listParams = [];
+            let lpIdx = 1;
+            for (const cr of contactResult.rows) {
+              listPlaceholders.push(`($${lpIdx},$${lpIdx+1})`);
+              listParams.push(listId, cr.id);
+              lpIdx += 2;
+            }
+            const listResult = await query(
+              `INSERT INTO list_contacts (list_id, contact_id)
+               VALUES ${listPlaceholders.join(',')}
+               ON CONFLICT (list_id, contact_id) DO NOTHING`,
+              listParams
+            );
+
+            added += listResult.rowCount;
+            upserts += batch.length - listResult.rowCount;
+          } catch (batchErr) {
+            // Fallback: process batch rows individually
+            logger.warn({ err: batchErr, batchStart: i, batchSize: batch.length }, 'Batch insert failed, falling back to individual inserts');
+            for (const r of batch) {
+              try {
+                const cr = await query(
+                  `INSERT INTO contacts (tenant_id, email, name, phone, identity_type, identity_name)
+                   VALUES ($1,$2,$3,$4,$5,$6)
+                   ON CONFLICT (tenant_id, email) DO UPDATE SET
+                     name=COALESCE(EXCLUDED.name, contacts.name),
+                     phone=COALESCE(EXCLUDED.phone, contacts.phone),
+                     identity_type=COALESCE(EXCLUDED.identity_type, contacts.identity_type),
+                     identity_name=COALESCE(EXCLUDED.identity_name, contacts.identity_name),
+                     updated_at=NOW()
+                   RETURNING id`,
+                  [tenantId, r.email, r.name, r.phone, r.identity_type, r.identity_name]
+                );
+                const contactId = cr.rows[0].id;
+                const lr = await query(
+                  `INSERT INTO list_contacts (list_id, contact_id)
+                   VALUES ($1,$2)
+                   ON CONFLICT (list_id, contact_id) DO NOTHING
+                   RETURNING id`,
+                  [listId, contactId]
+                );
+                if (lr.rowCount > 0) added += 1; else upserts += 1;
+              } catch (e) {
+                errors += 1;
+                if (errorSamples.length < 3) errorSamples.push({ row: r, error: e.message });
+              }
+            }
+          }
         }
       }
 

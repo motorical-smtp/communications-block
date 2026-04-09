@@ -65,6 +65,10 @@ app.use('/api', gdprRouter);
 app.use('/', webhooksRouter);
 app.use('/api/tracking', trackingRouter);
 
+// Public tracking routes (no auth required) - for click tracking and unsubscribe
+// These are accessed via email links, so they need to be at root level
+app.use('/', trackingRouter);
+
 // 404 handler for unmatched routes
 app.use((req, res) => {
   res.status(404).json({

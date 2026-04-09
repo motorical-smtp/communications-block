@@ -140,8 +140,8 @@ router.get('/unsubscribe-analytics', requireTenant, requireEntitledTenant, async
     if (campaignId) {
       const sendsQuery = `
         SELECT COUNT(*) as total_sent
-        FROM campaign_recipients
-        WHERE campaign_id = $1 AND tenant_id = $2
+        FROM email_events
+        WHERE campaign_id = $1 AND tenant_id = $2 AND type = 'sent'
       `;
       const sendsResult = await query(sendsQuery, [campaignId, req.tenantId]);
       const totalSent = parseInt(sendsResult.rows[0].total_sent);
