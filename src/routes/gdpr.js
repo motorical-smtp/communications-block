@@ -228,7 +228,7 @@ router.get('/gdpr/export', requireTenant, requireEntitledTenant, async (req, res
     
     // Send via Backend API's internal system email endpoint
     const apiUrl = process.env.BACKEND_API_URL || 'http://10.66.66.4:3001';
-    const token = process.env.COMM_INTERNAL_TOKEN || 'comm-internal-token-change-me';
+    const token = process.env.COMM_INTERNAL_TOKEN || '';
     
     const response = await fetch(`${apiUrl}/api/internal/system-email`, {
       method: 'POST',
