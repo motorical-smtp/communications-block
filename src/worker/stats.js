@@ -18,7 +18,7 @@ async function fetchJson(path) {
 async function syncCampaignTotals() {
   // MVP: compute totals from email_events for each active/sending campaign
   await query(
-    `UPDATE campaigns c SET status='completed'
+    `UPDATE campaigns c SET status='completed', completed_at=NOW()
      WHERE status='sending' AND NOT EXISTS (
        SELECT 1 FROM campaign_lists cl JOIN list_contacts lc ON lc.list_id=cl.list_id
        WHERE cl.campaign_id=c.id AND lc.status='active'

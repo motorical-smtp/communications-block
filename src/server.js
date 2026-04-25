@@ -79,8 +79,9 @@ app.use((req, res) => {
 });
 
 const port = Number(process.env.COMM_PORT || 3011);
-app.listen(port, () => {
-  logger.info({ port }, 'communications-block api started');
+const commHost = process.env.COMM_HOST || '127.0.0.1';
+app.listen(port, commHost, () => {
+  logger.info({ port, host: commHost }, 'communications-block api started');
 });
 
 export { pool };

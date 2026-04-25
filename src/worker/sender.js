@@ -286,7 +286,7 @@ async function processCampaign(c) {
     if (batch.length === 0) {
       logger.info({ campaignId: c.id }, 'no recipients remaining; completing');
       // nothing to send, mark complete
-      await query(`UPDATE campaigns SET status='completed' WHERE id=$1 AND status='sending'`, [c.id]);
+      await query(`UPDATE campaigns SET status='completed', completed_at=NOW() WHERE id=$1 AND status='sending'`, [c.id]);
       return;
     }
 
