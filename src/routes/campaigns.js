@@ -17,6 +17,22 @@ function requireTenant(req, res, next) {
   next();
 }
 
+function compactArtifact(artifact) {
+  if (!artifact) return null;
+  return {
+    id: artifact.id,
+    campaign_id: artifact.campaign_id,
+    version: artifact.version,
+    subject: artifact.subject,
+    created_at: artifact.created_at,
+    has_html: Boolean(artifact.html_compiled),
+    has_text: Boolean(artifact.text_compiled),
+    html_size: artifact.html_compiled ? Buffer.byteLength(String(artifact.html_compiled), 'utf8') : 0,
+    text_size: artifact.text_compiled ? String(artifact.text_compiled).length : 0,
+    metrics: artifact.meta?.security?.metrics || artifact.meta?.metrics || null
+  };
+}
+
 router.post('/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
     const { name, template_id, list_ids, motor_block_id, google_analytics, from_address, from_name } = req.body || {};
@@ -183,6 +199,7 @@ router.get('/campaigns/deleted', requireTenant, requireEntitledTenant, async (re
 
 router.get('/campaigns', requireTenant, requireEntitledTenant, async (req, res) => {
   try {
+    const compact = String(req.query.compact || 'false') === 'true';
     const r = await query(`SELECT c.id, c.name, c.template_id, c.motor_block_id, c.status, c.google_analytics, c.from_address, c.from_name,
                            CASE WHEN c.scheduled_at IS NOT NULL THEN to_char(c.scheduled_at::timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ELSE NULL END as scheduled_at, 
                            c.created_at,
@@ -196,6 +213,9 @@ router.get('/campaigns', requireTenant, requireEntitledTenant, async (req, res) 
     const enrichedCampaigns = await Promise.all(r.rows.map(async (campaign) => {
       const latestArtifact = await getLatestArtifact(campaign.id, req.tenantId);
       const latestSnapshot = await getLatestAudienceSnapshot(campaign.id, req.tenantId);
+      if (compact) {
+        return { ...campaign, latestArtifact: compactArtifact(latestArtifact), latestSnapshot };
+      }
       return { ...campaign, latestArtifact, latestSnapshot };
     }));
     
