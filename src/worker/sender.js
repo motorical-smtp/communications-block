@@ -242,7 +242,7 @@ async function sendOne({ from, to, subject, text, html, metadata, headers, motor
     } else {
       logger.warn('Queuing email WITHOUT headers', { emailId, from, hasHeaders: !!headers });
     }
-    await redis.lpush('email_delivery_queue', JSON.stringify(queueData));
+    await redis.lpush('campaign_delivery_queue', JSON.stringify(queueData));
   } finally {
     redis.disconnect();
   }
